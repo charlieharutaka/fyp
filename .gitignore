@@ -133,3 +133,7 @@ dmypy.json
 
 # Data
 data/
+
+# PyTorch Models
+old_models/
+*.pt

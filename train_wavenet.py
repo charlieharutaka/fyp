@@ -23,12 +23,12 @@ else:
 Initialize Model
 """
 
-model = WaveNet(layers=10,
-                blocks=4,
-                dilation_channels=16,
+model = WaveNet(layers=14,
+                blocks=2,
+                dilation_channels=32,
                 residual_channels=32,
-                skip_channels=32,
-                end_channels=64,
+                skip_channels=256,
+                end_channels=256,
                 classes=256,
                 bias=True)
 optimizer = torch.optim.Adam(model.parameters())
