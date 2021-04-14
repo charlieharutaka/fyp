@@ -9,7 +9,6 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset
 import torchaudio
 
-
 class SegmentedAudioDataset(Dataset):
     def __init__(self, audio_data, receptive_field, segment_size=32):
         """
@@ -82,7 +81,7 @@ class SegmentedAudioDataset(Dataset):
 
 
 class ChoralSingingDataset(Dataset):
-    def __init__(self, root, receptive_field, n_mels=128, n_fft=800):
+    def __init__(self, root, receptive_field, n_mels=64, n_fft=400):
         """
         Downloads the choral singing dataset, performs mel-spectrogram analysis on the data.
         Returns samples of segments of the dataset with the corresponding mel-spectrogram and part information.
@@ -125,8 +124,7 @@ class ChoralSingingDataset(Dataset):
         self.original_sample_rate = 44100
         self.target_sample_rate = 16000
         self.resample = torchaudio.transforms.Resample(self.original_sample_rate, self.target_sample_rate)
-        # The Mel-Spectrogram transform. f_min corresponds to C2 to get rid of very low frequency signals
-        self.melspec = torchaudio.transforms.MelSpectrogram(n_mels=n_mels, n_fft=n_fft, f_min=65.406, pad_mode="constant")
+        self.melspec = torchaudio.transforms.MelSpectrogram(n_mels=n_mels, n_fft=n_fft, pad_mode="constant")
         self.win_length = n_fft
         self.hop_length = self.win_length // 2
         # Model receptive field
@@ -161,41 +159,45 @@ class ChoralSingingDataset(Dataset):
                     w_length = w.shape[-1]
                     self.original_data.append((w, w_length, w_spec, piece, part, idx))
 
-        # Create chunks of the data: each entry in the spectrogram corresponds to win_length data points.
-        # We create segments every hop_length the size of win_length (s.t. there is overlap).
-        # Every t'th frame of the spectrogram is centered on time t x hop_length. Hence we must pad the waveform.
         self.length = 0
-        self.data = []
+        self.lengths = []
+        self.cumulative_lengths = []
         for data in self.original_data:
             num_segments = math.ceil(float(data[1]) / self.hop_length)
             self.length += num_segments
-            cur_idx = 0
-            cur_ptr = 0
-            # # Because torch is useless we have to do reflect padding by ourselves
-            # JK we can use constant padding (of 0) since the start/end of the waveforms are close enough to 0
-            padded_waveform = F.pad(data[0], (self.hop_length, num_segments * self.hop_length - data[1]), mode="constant")
-            # reversed_waveform = data[0].fliplr()
-            # padding_left = reversed_waveform[:, -self.hop_length:]
-            # padding_right = reversed_waveform[:, :num_segments * self.hop_length - data[1]]
-            # padded_waveform = torch.cat((padding_left, data[0], padding_right), dim=1)
-            while cur_ptr < padded_waveform.shape[1] - self.hop_length:
-                # Calculate where to start the input from for the receptive field
-                start_ptr = cur_ptr - self.receptive_field
-                input_length = self.receptive_field + self.win_length - 1
-                input_padding_length = 0
-                if start_ptr < 0:
-                    input_padding_length = -start_ptr
-                    input_length -= input_padding_length
-                    start_ptr = 0
-                input = padded_waveform.narrow(1, start_ptr, input_length)
-                if input_padding_length > 0:
-                    input = F.pad(input, (input_padding_length, 0), mode="constant")
-
-                target = padded_waveform.narrow(1, cur_ptr, self.win_length)
-                spec = data[2][:,:,cur_idx]
-                self.data.append((input, target, spec, data[3], data[4], data[5]))
-                cur_idx += 1
-                cur_ptr += self.hop_length
+            self.lengths.append(num_segments)
+            self.cumulative_lengths.append(self.length)
 
     def __len__(self):
         return self.length
+
+    def __getitem__(self, x):
+        # Find the corresponding data set for the index
+        is_bounded = False
+        last_cum_len = 0
+        for index, cum_len in enumerate(self.cumulative_lengths):
+            if x < cum_len:
+                is_bounded = True
+                break
+            last_cum_len = cum_len
+        if not is_bounded:
+            raise IndexError(
+                f"Index {x} is out of range for dataset size {len(self)}")
+        offset = x - last_cum_len
+        data = self.original_data[index]
+        num_segments = self.lengths[index]
+        padded_waveform = F.pad(data[0], (self.hop_length, num_segments * self.hop_length - data[1]), mode="constant")
+        waveform_ptr = self.hop_length * offset
+        start_ptr = waveform_ptr - self.receptive_field
+        input_length = self.receptive_field + self.win_length - 1
+        input_padding_length = 0
+        if start_ptr < 0:
+            input_padding_length = -start_ptr
+            input_length -= input_padding_length
+            start_ptr = 0
+        input = padded_waveform.narrow(1, start_ptr, input_length)
+        if input_padding_length > 0:
+            input = F.pad(input, (input_padding_length, 0), mode="constant")
+        target = padded_waveform.narrow(1, waveform_ptr, self.win_length)
+        spec = data[2][:,:,offset]
+        return (input, target, spec,  data[3], data[4], data[5])
