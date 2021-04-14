@@ -199,5 +199,5 @@ class ChoralSingingDataset(Dataset):
         if input_padding_length > 0:
             input = F.pad(input, (input_padding_length, 0), mode="constant")
         target = padded_waveform.narrow(1, waveform_ptr, self.win_length)
-        spec = data[2][:,:,offset]
+        spec = data[2][:,:,offset].squeeze()
         return (input, target, spec,  data[3], data[4], data[5])

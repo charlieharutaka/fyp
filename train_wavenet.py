@@ -31,10 +31,11 @@ model = WaveNet(layers=14,
                 end_channels=256,
                 classes=256,
                 bias=True)
+model.to(device)
+
 optimizer = torch.optim.Adam(model.parameters())
 criterion = nn.CrossEntropyLoss()
 
-model.to(device)
 nparams = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"Number of parameters: {nparams} | Receptive field: {model.receptive_field}")
 
