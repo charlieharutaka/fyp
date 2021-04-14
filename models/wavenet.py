@@ -83,12 +83,75 @@ class GatedActivationUnit(nn.Module):
         return f * g
 
 
+class ConditionalGatedActivationUnit(nn.Module):
+    """
+    Conditional Gated Activation Unit.
+    This module assumes that the condition has the same length as the input.
+    Hence global conditioning vectors should be expanded to this size.
+
+    Args:
+    - {int} in_channels:                Number of input channels
+    - {int} cond_channels:              Number of conditional channels
+    - {int} out_channels:               Number of output channels
+    - {int | (int, int)} kernel_size:   Size of convolving kernel
+    - {(int | (int, int))?} stride:     Kernel stride
+    - {(int | (int, int))?} padding:    Padding on data
+    - {(int | (int, int))?} dilation:   Kernel dilation
+    - {int?} groups:                    Number of kernel groups
+    - {bool?} bias:                     Whether to use bias or not
+
+    Forward pass:
+    - input: (N, in_channels, L)
+    - output: (N, out_channels, L')
+    """
+    def __init__(self,
+                 in_channels,
+                 cond_channels,
+                 out_channels,
+                 kernel_size,
+                 stride=1,
+                 padding=0,
+                 dilation=1,
+                 groups=1,
+                 bias=True):
+        super(ConditionalGatedActivationUnit, self).__init__()
+        self.out_channels = out_channels
+        self.conv = nn.Conv1d(in_channels,
+                           2 * out_channels,
+                           kernel_size,
+                           stride=stride,
+                           padding=padding,
+                           dilation=dilation,
+                           groups=groups,
+                           bias=bias)
+        self.cond_conv = nn.Conv1d(cond_channels,
+                                  2 * out_channels,
+                                  1,
+                                  stride=stride,
+                                  padding=padding,
+                                  dilation=dilation,
+                                  groups=groups,
+                                  bias=bias)
+    
+    def forward(self, x, condition=None):
+        f, g = torch.split(self.conv(x), self.out_channels, dim=1)
+        if condition is not None:
+            condition = condition.narrow(2, -f.shape[2], f.shape[2])
+            f_c, g_c = torch.split(self.cond_conv(condition), self.out_channels, dim=1)
+            f = f + f_c
+            g = g + g_c
+        f = torch.tanh(f)
+        g = torch.sigmoid(g)
+        return f * g
+
+
 class ResidualBlock(nn.Module):
     """
     Residual Block with Skip Connections
 
     Args:
     - {int} in_channels:                Number of input channels
+    - {int} cond_channels:              Number of conditional channels
     - {int} dilation_channels:          Number of dilation channels
     - {int} residual_channels:          Number of residual channels
     - {int} skip_channels:              Number of skip channels
@@ -105,6 +168,7 @@ class ResidualBlock(nn.Module):
     """
     def __init__(self,
                in_channels,
+               cond_channels,
                dilation_channels,
                residual_channels,
                skip_channels,
@@ -116,14 +180,15 @@ class ResidualBlock(nn.Module):
                bias=True):
         super(ResidualBlock, self).__init__()
         self.kernel_size = kernel_size
-        self.conv = GatedActivationUnit(in_channels,
-                                        dilation_channels,
-                                        kernel_size, 
-                                        stride=stride,
-                                        padding=padding, 
-                                        dilation=dilation,
-                                        groups=groups,
-                                        bias=bias)
+        self.conv = ConditionalGatedActivationUnit(in_channels,
+                                                   cond_channels,
+                                                   dilation_channels,
+                                                   kernel_size, 
+                                                   stride=stride,
+                                                   padding=padding, 
+                                                   dilation=dilation,
+                                                   groups=groups,
+                                                   bias=bias)
         self.resd_conv = nn.Conv1d(dilation_channels,
                                    residual_channels,
                                    1,
@@ -141,17 +206,18 @@ class ResidualBlock(nn.Module):
                                    groups=1,
                                    bias=bias)
 
-    def forward(self, x):
-        out = self.conv(x)
+    def forward(self, x, condition=None):
+        out = self.conv(x, condition)
         res = self.resd_conv(out)
         skip = self.skip_conv(out)
-        out = x[:, :, (self.kernel_size - 1):] + res
+        out = x.narrow(2, -res.shape[2], res.shape[2]) + res
         return out, skip
 
 
 class DilatedQueueResidualBlock(nn.Module):
     def __init__(self,
                  in_channels,
+                 cond_channels,
                  dilation_channels,
                  residual_channels,
                  skip_channels,
@@ -168,6 +234,7 @@ class DilatedQueueResidualBlock(nn.Module):
         self.dilation_factor = int(dilation)# / initial_dilation)
         self.padding = padding
         self.residual_block = ResidualBlock(in_channels,
+                                            cond_channels,
                                             dilation_channels,
                                             residual_channels,
                                             skip_channels,
@@ -179,25 +246,27 @@ class DilatedQueueResidualBlock(nn.Module):
                                             bias=bias)
         self.queue = ConvolutionQueue(residual_channels, dilation)
     
-    def forward(self, x):
-        # If in training, use dilation without queues
-        if self.training:
-            # Shape is (N, C, L)
-            x, left_pad = self.dilate(x, self.dilation_factor)
-            x, skip = self.residual_block(x)
-            x = self.undilate(x, self.dilation_factor, left_pad, self.padding)
-            skip = self.undilate(skip, self.dilation_factor, left_pad, self.padding)
-            return x, skip
-        # If not training, use queues
-        else:
-            # Shape is (1, C, 1)
-            # Assume x is a singular data point
-            popped = self.queue(x.squeeze())
-            popped = popped.unsqueeze(1).unsqueeze(0)
-            # Concatenate popped and x to feed into conv
-            x = torch.cat((popped, x), dim=2)
-            # now shape is (1, C, 2)
-            return self.residual_block(x)
+    def forward(self, x, condition=None):
+        # Shape is (N, C, L)
+        x, left_pad = self.dilate(x, self.dilation_factor)
+        # The condition should also be dilated to fit the input data
+        if condition is not None:
+            condition, _ = self.dilate(condition, self.dilation_factor)
+        x, skip = self.residual_block(x, condition)
+        x = self.undilate(x, self.dilation_factor, left_pad, self.padding)
+        skip = self.undilate(skip, self.dilation_factor, left_pad, self.padding)
+        return x, skip
+    
+    def generate(self, x, condition=None):
+        # Shape is (1, C, 1)
+        # Assume x is a singular data point
+        popped = self.queue(x.squeeze())
+        popped = popped.unsqueeze(1).unsqueeze(0)
+        # Concatenate popped and x to feed into conv
+        x = torch.cat((popped, x), dim=2)
+        # now shape is (1, C, 2)
+        # The condition should also be a singular data point
+        return self.residual_block(x, condition)
     
     def dilate(self, x, dilation, left_pad=True):
         """
@@ -260,7 +329,9 @@ class WaveNet(nn.Module):
     def __init__(self,
                  layers=10,
                  blocks=4,
-                 channels=1,
+                 in_channels=1,
+                 cond_in_channels=1,
+                 cond_channels=32,
                  dilation_channels=32,
                  residual_channels=32,
                  skip_channels=256,
@@ -272,7 +343,8 @@ class WaveNet(nn.Module):
 
         self.layers = layers
         self.blocks = blocks
-        self.channels = channels
+        self.in_channels = in_channels
+        self.cond_channels = cond_channels
         self.dilation_channels = dilation_channels
         self.residual_channels = residual_channels
         self.skip_channels = skip_channels
@@ -282,10 +354,14 @@ class WaveNet(nn.Module):
         self.dilations = []
         self.receptive_field = 1
 
-        self.input_conv = nn.Conv1d(in_channels=channels,
+        self.input_conv = nn.Conv1d(in_channels=in_channels,
                                     out_channels=residual_channels,
                                     kernel_size=1,
                                     bias=bias)
+        self.cond_conv = nn.Conv1d(in_channels=cond_in_channels,
+                                   out_channels=cond_channels,
+                                   kernel_size=1,
+                                   bias=bias)
 
         self.residual_blocks = nn.ModuleList()
         for b in range(blocks):
@@ -296,6 +372,7 @@ class WaveNet(nn.Module):
                 self.dilations.append((dilation, initial_dilation))
                 self.residual_blocks.append(DilatedQueueResidualBlock(
                         in_channels=residual_channels,
+                        cond_channels=cond_channels,
                         dilation_channels=dilation_channels,
                         residual_channels=residual_channels,
                         skip_channels=skip_channels,
@@ -319,14 +396,23 @@ class WaveNet(nn.Module):
                                                     kernel_size=1,
                                                     bias=True)])
 
-    def forward(self, x):
+    def forward(self, x, condition=None, generate=False):
         x = self.input_conv(x)
         skip = 0
 
+        if condition is not None:
+            # Condition should have the same length as the input x
+            # Condition is (B x cond_in_channels x whatever)
+            condition = self.cond_conv(condition)
+            # Condition is (B x cond_channels x whatever)
+
         for i in range(self.blocks * self.layers):
-            x, s = self.residual_blocks[i](x)
+            if generate:
+                x, s = self.residual_blocks[i].generate(x, condition)
+            else:
+                x, s = self.residual_blocks[i](x, condition)
             try:
-                skip = skip.narrow(2, -s.size(2), s.size(2))
+                skip = skip.narrow(2, -s.shape[2], s.shape[2])
             except:
                 skip = 0
             skip = s + skip
@@ -335,7 +421,7 @@ class WaveNet(nn.Module):
         x = self.output_conv(x)
 
         return x
-    
+
     def clear_queues(self, device=torch.device('cpu')):
         for block in self.residual_blocks:
             block.clear_queue(device)
