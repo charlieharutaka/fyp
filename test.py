@@ -12,10 +12,13 @@ from utils.datasets import ChoralSingingDataset
 # writer.add_graph(model, (torch.randn(32, 1, model.receptive_field + 399), torch.randn(32, 64, model.receptive_field + 399)))
 # writer.close()
 
-csd = ChoralSingingDataset('data', 4093)
-dataloader = DataLoader(csd, batch_size=1, shuffle=True)
+csd = ChoralSingingDataset('data', 4093, segment_size=32)
+print(csd.cumulative_lengths)
+print(csd[0])
+print(csd[0][0].shape, csd[0][1].shape, csd[0][2].shape)
+# dataloader = DataLoader(csd, batch_size=1, shuffle=True)
 
-for batch in dataloader:
-    print(batch)
-    print(batch[2].unsqueeze(-1).shape)
-    break
+# for batch in dataloader:
+#     print(batch)
+#     print(batch[2].unsqueeze(-1).shape)
+#     break

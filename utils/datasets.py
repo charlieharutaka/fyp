@@ -2,6 +2,7 @@ import math
 import os
 from os import path
 from zipfile import ZipFile
+from collections import Counter
 
 import gdown
 import torch
@@ -81,7 +82,7 @@ class SegmentedAudioDataset(Dataset):
 
 
 class ChoralSingingDataset(Dataset):
-    def __init__(self, root, receptive_field, n_mels=64, n_fft=400):
+    def __init__(self, root, receptive_field, segment_size=None, segment_hop=None, n_mels=64, n_fft=400):
         """
         Downloads the choral singing dataset, performs mel-spectrogram analysis on the data.
         Returns samples of segments of the dataset with the corresponding mel-spectrogram and part information.
@@ -92,11 +93,13 @@ class ChoralSingingDataset(Dataset):
             |--- receptive_field ---|
                                   |-- segment_size ---|
             | | | | | | | | input | | | | | | | | | | |
-                                  \ \ \ \ \ \ \ \ \ \ \  } Causal
-                                   \ \ \ \ \ \ \ \ \ \ \ } Prediction
+                                  \ \ \ \ \ \ \ \ \ \ \   } Causal
+                                   \ \ \ \ \ \ \ \ \ \ \  } Prediction
                                     | | |  target | | | |
                                     |-- segment_size ---|
-        The mel-spectrogram data is for the *target* segment.
+            |     |     |     |     |    |    |    |    | } Spectrogram
+            | --- | <- Spectrogram Frame size
+        The mel-spectrogram data are of frames from the input sequence used for local conditioning.
         In this case the segment_size is the size of the FFT window.
         """
         # Paths
@@ -124,9 +127,13 @@ class ChoralSingingDataset(Dataset):
         self.original_sample_rate = 44100
         self.target_sample_rate = 16000
         self.resample = torchaudio.transforms.Resample(self.original_sample_rate, self.target_sample_rate)
+        self.n_mels = n_mels
+        self.n_fft = n_fft
         self.melspec = torchaudio.transforms.MelSpectrogram(n_mels=n_mels, n_fft=n_fft, pad_mode="constant")
         self.win_length = n_fft
         self.hop_length = self.win_length // 2
+        self.segment_size = segment_size if segment_size is not None else n_fft
+        self.segment_hop = segment_hop if segment_hop is not None else self.segment_size // 2
         # Model receptive field
         self.receptive_field = receptive_field
 
@@ -163,7 +170,7 @@ class ChoralSingingDataset(Dataset):
         self.lengths = []
         self.cumulative_lengths = []
         for data in self.original_data:
-            num_segments = math.ceil(float(data[1]) / self.hop_length)
+            num_segments = math.ceil(float(data[1]) / self.segment_hop)
             self.length += num_segments
             self.lengths.append(num_segments)
             self.cumulative_lengths.append(self.length)
@@ -186,18 +193,31 @@ class ChoralSingingDataset(Dataset):
         offset = x - last_cum_len
         data = self.original_data[index]
         num_segments = self.lengths[index]
+
+        # The padding must be consistent with the mel spectrogram
         padded_waveform = F.pad(data[0], (self.hop_length, num_segments * self.hop_length - data[1]), mode="constant")
-        waveform_ptr = self.hop_length * offset
+        waveform_ptr = self.segment_hop * offset
         start_ptr = waveform_ptr - self.receptive_field
-        input_length = self.receptive_field + self.win_length - 1
+        input_length = self.receptive_field + self.segment_size - 1
         input_padding_length = 0
         if start_ptr < 0:
             input_padding_length = -start_ptr
             input_length -= input_padding_length
             start_ptr = 0
+        # Get the input waveform
         input = padded_waveform.narrow(1, start_ptr, input_length)
         if input_padding_length > 0:
             input = F.pad(input, (input_padding_length, 0), mode="constant")
-        target = padded_waveform.narrow(1, waveform_ptr, self.win_length)
-        spec = data[2][:,:,offset].squeeze()
-        return (input, target, spec,  data[3], data[4], data[5])
+        # Get the target waveform
+        target = padded_waveform.narrow(1, waveform_ptr, self.segment_size)
+        # Get the spectrograms
+        # spec = data[2][:,:,offset].squeeze()
+        # The t'th spectrogram is centered on the t * self.hop_length'th waveform data point
+        # So input data points from t * self.hop_length - (self.hop_length // 2) to 
+        # t * self.hop_length + (self.hop_length // 2) - 1 are associated with frame t
+        # TODO: Probably a more efficient way of doing this but CBA
+        spec_indices = [((i + (self.hop_length // 2)) // self.hop_length) for i in range(start_ptr - input_padding_length, waveform_ptr + self.segment_size)]
+        spec_expand_idx_lens = Counter(spec_indices)
+        specs = torch.cat([data[2].narrow(2, idx, 1)[0].expand(-1, spec_expand_idx_lens[idx]) if idx >= 0 else torch.zeros((self.n_mels, spec_expand_idx_lens[idx])) for idx in sorted(spec_expand_idx_lens.keys())], dim=1)
+
+        return (input, target, specs,  data[3], data[4], data[5])
