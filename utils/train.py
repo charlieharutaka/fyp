@@ -1,7 +1,7 @@
+import time
+
 import numpy as np
 import torch
-from torch.utils.tensorboard import SummaryWriter
-import torch.nn.functional as F
 from torchaudio.transforms import MuLawEncoding
 
 
@@ -15,7 +15,7 @@ def eval_conditional_wavenet(model, loader_val, criterion, encoder=MuLawEncoding
             # inputs (B, 1, T) | targets (B, 1, T) | condition (B, mels)
             # We need to reshape the tensors into:
             # inputs (B, 1, T) | targets (B, T) | condition (B, mels, T)
-            targets = encoder(targets.squeeze())
+            targets = encoder(targets.squeeze(1))
             condition = condition.unsqueeze(-1).expand(batch_size, -1, timesteps)
             # Transfer them to the device
             inputs = inputs.to(device)
@@ -62,7 +62,7 @@ def train_conditional_wavenet(model,
             # inputs (B, 1, T) | targets (B, 1, T) | condition (B, mels)
             # We need to reshape the tensors into:
             # inputs (B, 1, T) | targets (B, T) | condition (B, mels, T)
-            targets = encoder(targets.squeeze())
+            targets = encoder(targets.squeeze(1))
             condition = condition.unsqueeze(-1).expand(batch_size, -1, timesteps)
             # Transfer them to the device
             inputs = inputs.to(device)
@@ -78,7 +78,7 @@ def train_conditional_wavenet(model,
 
             # Validate if we need to
             if loader_val is not None and validate_every > 0 and counter % validate_every == 0:
-                last_validation_score = eval_conditional_wavenet(model, loader_val, encoder, device)
+                last_validation_score = eval_conditional_wavenet(model, loader_val, criterion, encoder, device)
                 validation_scores.append(last_validation_score)
                 if writer is not None:
                     writer.add_scalar("Validation Score", last_validation_score, counter - 1)
@@ -91,8 +91,9 @@ def train_conditional_wavenet(model,
                 writer.add_scalar("Loss", loss_item, counter - 1)
 
             if print_every > 0 and counter % print_every == 0:
+                current_time = time.strftime("%y/%m/%d %H:%M:%S")
                 print(
-                    f'Epoch: {epoch+1} | Batch: {t+1} | Loss: {running_loss / print_every} | Last validation score: {last_validation_score}')
+                    f'[{current_time}] Epoch: {epoch+1} | Batch: {t+1} | Loss: {running_loss / print_every} | Last validation score: {last_validation_score}')
                 running_loss = 0.0
                 if writer is not None:
                     writer.flush()
