@@ -218,6 +218,7 @@ class ChoralSingingDataset(Dataset):
         # TODO: Probably a more efficient way of doing this but CBA
         spec_indices = [((i + (self.hop_length // 2)) // self.hop_length) for i in range(start_ptr - input_padding_length, waveform_ptr + self.segment_size)]
         spec_expand_idx_lens = Counter(spec_indices)
-        specs = torch.cat([data[2].narrow(2, idx, 1)[0].expand(-1, spec_expand_idx_lens[idx]) if idx >= 0 else torch.zeros((self.n_mels, spec_expand_idx_lens[idx])) for idx in sorted(spec_expand_idx_lens.keys())], dim=1)
+        max_spec_len = data[2].shape[-1]
+        specs = torch.cat([data[2].narrow(2, idx, 1)[0].expand(-1, spec_expand_idx_lens[idx]) if idx >= 0 and idx < max_spec_len else torch.zeros((self.n_mels, spec_expand_idx_lens[idx])) for idx in sorted(spec_expand_idx_lens.keys())], dim=1)
 
         return (input, target, specs,  data[3], data[4], data[5])
