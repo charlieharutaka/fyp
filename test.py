@@ -14,11 +14,11 @@ from utils.transforms import BoxCoxTransform, ZScoreTransform
 # writer.add_graph(model, (torch.randn(32, 1, model.receptive_field + 399), torch.randn(32, 64, model.receptive_field + 399)))
 # writer.close()
 
-spectrogram_transform = nn.Sequential(BoxCoxTransform(0.05), ZScoreTransform())
-csd = ChoralSingingDataset('data', 4093, n_mels=128, n_fft=800, spectrogram_transform=spectrogram_transform)
-test = csd.original_data[0]
-print(test[2].max(), test[2].min(), test[2].mean(), test[2].std())
-# dataloader = DataLoader(csd, batch_size=1, shuffle=True)
+spectrogram_transform = nn.Sequential(BoxCoxTransform(0.1), ZScoreTransform())
+csd = ChoralSingingDataset('data', 4093, n_mels=64, n_fft=400, spectrogram_transform=spectrogram_transform)
+test = csd[0]
+print(test[0].shape, test[1].shape, test[2].shape)
+dataloader = DataLoader(csd, batch_size=1, shuffle=True)
 
 # for batch in dataloader:
 #     print(batch)

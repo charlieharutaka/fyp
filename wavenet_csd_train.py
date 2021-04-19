@@ -26,7 +26,7 @@ wavenet_hp = {
     "layers": 10,
     "blocks": 4,
     "in_channels": 1,
-    "cond_in_channels": 128,
+    "cond_in_channels": 64,
     "cond_channels": 32,
     "dilation_channels": 32,
     "residual_channels": 32,
@@ -52,8 +52,8 @@ criterion = nn.CrossEntropyLoss()
 
 # The Dataset
 # We want to normalize the data using box-cox and z-score normalization
-spectrogram_transform = nn.Sequential(BoxCoxTransform(0.05), ZScoreTransform())
-dataset = ChoralSingingDataset('data', model.receptive_field, n_mels=128, n_fft=800, spectrogram_transform=spectrogram_transform)
+spectrogram_transform = nn.Sequential(BoxCoxTransform(0.1), ZScoreTransform())
+dataset = ChoralSingingDataset('data', model.receptive_field, n_mels=64, n_fft=400, spectrogram_transform=spectrogram_transform)
 # Calculate the splits
 length_train = int(0.99 * len(dataset))
 length_valid = len(dataset) - length_train
@@ -62,7 +62,7 @@ dataset_train, dataset_valid = random_split(dataset, [length_train, length_valid
 loader_train = DataLoader(dataset_train, batch_size=BATCH_SIZE, shuffle=True)
 loader_valid = DataLoader(dataset_valid, batch_size=BATCH_SIZE, shuffle=False)
 
-MODEL_NAME = "wavenet.csd2"
+MODEL_NAME = "wavenet.csd3"
 
 print(f"=====\nTraining Samples/Batches: {length_train}/{len(loader_train)}\nTesting Samples/Batches: {length_valid}/{len(loader_valid)}")
 print(f"=====\nTraining {MODEL_NAME}...")

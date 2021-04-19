@@ -213,15 +213,15 @@ class ChoralSingingDataset(Dataset):
             input = F.pad(input, (input_padding_length, 0), mode="constant")
         # Get the target waveform
         target = padded_waveform.narrow(1, waveform_ptr, self.segment_size)
-        # Get the spectrograms
-        # spec = data[2][:,:,offset].squeeze()
+        # Get the spectrograms for the target
+        specs = data[2][:,:,offset].squeeze().unsqueeze(-1).expand(-1, input.shape[-1] + 1)
         # The t'th spectrogram is centered on the t * self.hop_length'th waveform data point
         # So input data points from t * self.hop_length - (self.hop_length // 2) to 
         # t * self.hop_length + (self.hop_length // 2) - 1 are associated with frame t
         # TODO: Probably a more efficient way of doing this but CBA
-        spec_indices = [((i + (self.hop_length // 2)) // self.hop_length) for i in range(start_ptr - input_padding_length, waveform_ptr + self.segment_size)]
-        spec_expand_idx_lens = Counter(spec_indices)
-        max_spec_len = data[2].shape[-1]
-        specs = torch.cat([data[2].narrow(2, idx, 1)[0].expand(-1, spec_expand_idx_lens[idx]) if idx >= 0 and idx < max_spec_len else torch.zeros((self.n_mels, spec_expand_idx_lens[idx])) for idx in sorted(spec_expand_idx_lens.keys())], dim=1)
+        # spec_indices = [((i + (self.hop_length // 2)) // self.hop_length) for i in range(start_ptr - input_padding_length, waveform_ptr + self.segment_size)]
+        # spec_expand_idx_lens = Counter(spec_indices)
+        # max_spec_len = data[2].shape[-1]
+        # specs = torch.cat([data[2].narrow(2, idx, 1)[0].expand(-1, spec_expand_idx_lens[idx]) if idx >= 0 and idx < max_spec_len else torch.zeros((self.n_mels, spec_expand_idx_lens[idx])) for idx in sorted(spec_expand_idx_lens.keys())], dim=1
 
         return (input, target, specs,  data[3], data[4], data[5])
