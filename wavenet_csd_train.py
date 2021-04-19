@@ -40,7 +40,6 @@ wavenet_hp = {
 BATCH_SIZE = 32
 encoder = torchaudio.transforms.MuLawEncoding(wavenet_hp["classes"])
 decoder = torchaudio.transforms.MuLawDecoding(wavenet_hp["classes"])
-writer = SummaryWriter()
 
 # The Model
 model = WaveNet(**wavenet_hp)
@@ -68,6 +67,7 @@ MODEL_NAME = "wavenet.csd2"
 print(f"=====\nTraining Samples/Batches: {length_train}/{len(loader_train)}\nTesting Samples/Batches: {length_valid}/{len(loader_valid)}")
 print(f"=====\nTraining {MODEL_NAME}...")
 
+writer = SummaryWriter(log_dir=f"./runs/{MODEL_NAME}")
 train_losses, valid_losses = train_conditional_wavenet(model, optimizer, criterion, 10, loader_train, loader_valid, encoder, print_every=1000, save_every=10000, validate_every=1000, save_as=MODEL_NAME, writer=writer, device=device)
 torch.save(model.state_dict(), f"{MODEL_NAME}.final.pt")
 writer.close()
