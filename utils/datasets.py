@@ -162,7 +162,7 @@ class ChoralSingingDataset(Dataset):
                     w, sr = torchaudio.load(file_to_load)
                     assert sr == self.original_sample_rate, "Sample rate mismatch"
                     w = self.resample(w)
-                    w_spec = self.melspec(w)
+                    w_spec = torch.log(self.melspec(w) + 1.0) # Use logarithmic spectrogram
                     w_length = w.shape[-1]
                     self.original_data.append((w, w_length, w_spec, piece, part, idx))
 

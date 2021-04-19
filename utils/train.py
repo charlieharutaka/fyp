@@ -12,11 +12,11 @@ def eval_conditional_wavenet(model, loader_val, criterion, encoder=MuLawEncoding
         for batch in loader_val:
             inputs, targets, condition, _, _, _ = batch
             batch_size, _, timesteps = inputs.shape
-            # inputs (B, 1, T) | targets (B, 1, T) | condition (B, mels)
+            # inputs (B, 1, T) | targets (B, 1, T) | condition (B, mels, T + 1)
             # We need to reshape the tensors into:
             # inputs (B, 1, T) | targets (B, T) | condition (B, mels, T)
             targets = encoder(targets.squeeze(1))
-            condition = condition.unsqueeze(-1).expand(batch_size, -1, timesteps)
+            condition = condition.narrow(2, 1, timesteps)
             # Transfer them to the device
             inputs = inputs.to(device)
             targets = targets.to(device)
@@ -59,11 +59,11 @@ def train_conditional_wavenet(model,
 
             inputs, targets, condition, _, _, _ = batch
             batch_size, _, timesteps = inputs.shape
-            # inputs (B, 1, T) | targets (B, 1, T) | condition (B, mels)
+            # inputs (B, 1, T) | targets (B, 1, T) | condition (B, mels, T + 1)
             # We need to reshape the tensors into:
             # inputs (B, 1, T) | targets (B, T) | condition (B, mels, T)
             targets = encoder(targets.squeeze(1))
-            condition = condition.unsqueeze(-1).expand(batch_size, -1, timesteps)
+            condition = condition.narrow(2, 1, timesteps)
             # Transfer them to the device
             inputs = inputs.to(device)
             targets = targets.to(device)

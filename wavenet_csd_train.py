@@ -61,4 +61,6 @@ loader_valid = DataLoader(dataset_valid, batch_size=BATCH_SIZE, shuffle=False)
 print(f"=====\nTraining Samples/Batches: {length_train}/{len(loader_train)}\nTesting Samples/Batches: {length_valid}/{len(loader_valid)}")
 print("=====\nTraining...")
 
-train_losses, valid_losses = train_conditional_wavenet(model, optimizer, criterion, 10, loader_train, loader_valid, encoder, print_every=1000, save_every=10000, validate_every=1000, save_as="wavenet.csd", writer=writer, device=device)
+train_losses, valid_losses = train_conditional_wavenet(model, optimizer, criterion, 10, loader_train, loader_valid, encoder, print_every=1000, save_every=10000, validate_every=1000, save_as="wavenet.csd.finegrained.offset", writer=writer, device=device)
+torch.save(model.state_dict(), "wavenet.csd.finegrained.offset.final.pt")
+writer.close()
