@@ -8,6 +8,7 @@ from torch.utils.data import DataLoader, random_split
 from models.wavenet import WaveNet
 from utils.datasets import ChoralSingingDataset
 from utils.train import train_conditional_wavenet
+from utils.transforms import BoxCoxTransform, ZScoreTransform
 
 import torchaudio
 if os.name == 'posix':
@@ -25,7 +26,7 @@ wavenet_hp = {
     "layers": 10,
     "blocks": 4,
     "in_channels": 1,
-    "cond_in_channels": 64,
+    "cond_in_channels": 128,
     "cond_channels": 32,
     "dilation_channels": 32,
     "residual_channels": 32,
@@ -51,16 +52,22 @@ optimizer = torch.optim.Adam(model.parameters())
 criterion = nn.CrossEntropyLoss()
 
 # The Dataset
-dataset = ChoralSingingDataset('data', model.receptive_field)
+# We want to normalize the data using box-cox and z-score normalization
+spectrogram_transform = nn.Sequential(BoxCoxTransform(0.05), ZScoreTransform())
+dataset = ChoralSingingDataset('data', model.receptive_field, n_mels=128, n_fft=800, spectrogram_transform=spectrogram_transform)
+# Calculate the splits
 length_train = int(0.99 * len(dataset))
 length_valid = len(dataset) - length_train
+
 dataset_train, dataset_valid = random_split(dataset, [length_train, length_valid])
 loader_train = DataLoader(dataset_train, batch_size=BATCH_SIZE, shuffle=True)
 loader_valid = DataLoader(dataset_valid, batch_size=BATCH_SIZE, shuffle=False)
 
-print(f"=====\nTraining Samples/Batches: {length_train}/{len(loader_train)}\nTesting Samples/Batches: {length_valid}/{len(loader_valid)}")
-print("=====\nTraining...")
+MODEL_NAME = "wavenet.csd2"
 
-train_losses, valid_losses = train_conditional_wavenet(model, optimizer, criterion, 10, loader_train, loader_valid, encoder, print_every=1000, save_every=10000, validate_every=1000, save_as="wavenet.csd.finegrained.offset", writer=writer, device=device)
-torch.save(model.state_dict(), "wavenet.csd.finegrained.offset.final.pt")
+print(f"=====\nTraining Samples/Batches: {length_train}/{len(loader_train)}\nTesting Samples/Batches: {length_valid}/{len(loader_valid)}")
+print(f"=====\nTraining {MODEL_NAME}...")
+
+train_losses, valid_losses = train_conditional_wavenet(model, optimizer, criterion, 10, loader_train, loader_valid, encoder, print_every=1000, save_every=10000, validate_every=1000, save_as=MODEL_NAME, writer=writer, device=device)
+torch.save(model.state_dict(), f"{MODEL_NAME}.final.pt")
 writer.close()

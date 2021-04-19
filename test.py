@@ -1,8 +1,10 @@
 # import torch
 # from torch.utils.tensorboard import SummaryWriter
+from torch import nn
 from torch.utils.data import DataLoader
 
 from utils.datasets import ChoralSingingDataset
+from utils.transforms import BoxCoxTransform, ZScoreTransform
 # from models.wavenet import WaveNet
 
 # writer = SummaryWriter(log_dir="runs/model")
@@ -12,10 +14,10 @@ from utils.datasets import ChoralSingingDataset
 # writer.add_graph(model, (torch.randn(32, 1, model.receptive_field + 399), torch.randn(32, 64, model.receptive_field + 399)))
 # writer.close()
 
-csd = ChoralSingingDataset('data', 4093)
-print(csd.cumulative_lengths)
-print(csd[0])
-print(csd[15357])
+spectrogram_transform = nn.Sequential(BoxCoxTransform(0.05), ZScoreTransform())
+csd = ChoralSingingDataset('data', 4093, n_mels=128, n_fft=800, spectrogram_transform=spectrogram_transform)
+test = csd.original_data[0]
+print(test[2].max(), test[2].min(), test[2].mean(), test[2].std())
 # dataloader = DataLoader(csd, batch_size=1, shuffle=True)
 
 # for batch in dataloader:

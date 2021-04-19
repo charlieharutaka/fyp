@@ -82,7 +82,7 @@ class SegmentedAudioDataset(Dataset):
 
 
 class ChoralSingingDataset(Dataset):
-    def __init__(self, root, receptive_field, segment_size=None, segment_hop=None, n_mels=64, n_fft=400):
+    def __init__(self, root, receptive_field, segment_size=None, segment_hop=None, n_mels=64, n_fft=400, spectrogram_transform=None):
         """
         Downloads the choral singing dataset, performs mel-spectrogram analysis on the data.
         Returns samples of segments of the dataset with the corresponding mel-spectrogram and part information.
@@ -134,6 +134,7 @@ class ChoralSingingDataset(Dataset):
         self.hop_length = self.win_length // 2
         self.segment_size = segment_size if segment_size is not None else n_fft
         self.segment_hop = segment_hop if segment_hop is not None else self.segment_size // 2
+        self.spectrogram_transform = spectrogram_transform
         # Model receptive field
         self.receptive_field = receptive_field
 
@@ -162,7 +163,9 @@ class ChoralSingingDataset(Dataset):
                     w, sr = torchaudio.load(file_to_load)
                     assert sr == self.original_sample_rate, "Sample rate mismatch"
                     w = self.resample(w)
-                    w_spec = torch.log(self.melspec(w) + 1.0) # Use logarithmic spectrogram
+                    w_spec = self.melspec(w)
+                    if self.spectrogram_transform is not None:
+                        w_spec = spectrogram_transform(w_spec)
                     w_length = w.shape[-1]
                     self.original_data.append((w, w_length, w_spec, piece, part, idx))
 
