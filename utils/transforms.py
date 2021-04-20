@@ -22,3 +22,28 @@ class ZScoreTransform(Module):
     def forward(_, y):
         return (y - y.mean()) / y.std()
         
+
+class PowerToDecibelTransform(Module):
+    def __init__(self, ref=1.0, amin=1e-10, top_db=80.0):
+        super(PowerToDecibelTransform, self).__init__()
+        assert amin > 0, "amin must be strictly positive"
+        if top_db is not None:
+            assert top_db > 0, "top_db must be non-negative"
+        if callable(ref):
+            self._callable_ref = True
+        self.ref = ref
+        self.amin = amin
+        self.top_db = top_db
+
+    def forward(self, S):
+        if self._callable_ref:
+            ref_value = self.ref(S)
+        else:
+            ref_value = torch.abs(torch.full_like(S, self.ref))
+        amin_tensor = torch.full_like(S, self.amin)
+        log_spec = 10.0 * torch.log10(torch.maximum(amin_tensor, S))
+        log_spec = log_spec - (10.0 * torch.log10(torch.maximum(amin_tensor, ref_value)))
+
+        if self.top_db is not None:
+            log_spec = torch.maximum(log_spec, log_spec.max() - self.top_db)
+        return log_spec
