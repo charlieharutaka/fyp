@@ -47,3 +47,14 @@ class PowerToDecibelTransform(Module):
         if self.top_db is not None:
             log_spec = torch.maximum(log_spec, log_spec.max() - self.top_db)
         return log_spec
+
+
+class ScaleToIntervalTransform(Module):
+    def __init__(self, lower=0.0, upper=1.0):
+        super(ScaleToIntervalTransform, self).__init__()
+        assert upper > lower, "Interval must have positive width"
+        self.lower = lower
+        self.upper = upper
+
+    def forward(self, x):
+        return self.lower + ((x - x.min()) * (self.upper - self.lower)) / (x.max() - x.min())

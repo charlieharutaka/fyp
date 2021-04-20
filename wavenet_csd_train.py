@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader, random_split
 from models.wavenet import WaveNet
 from utils.datasets import ChoralSingingDataset
 from utils.train import train_conditional_wavenet
-from utils.transforms import BoxCoxTransform, ZScoreTransform, PowerToDecibelTransform
+from utils.transforms import BoxCoxTransform, ZScoreTransform, PowerToDecibelTransform, ScaleToIntervalTransform
 
 import torchaudio
 if os.name == 'posix':
@@ -53,7 +53,7 @@ criterion = nn.CrossEntropyLoss()
 # The Dataset
 # We want to normalize the data using box-cox and z-score normalization
 # spectrogram_transform = nn.Sequential(BoxCoxTransform(0.1), ZScoreTransform())
-spectrogram_transform = PowerToDecibelTransform(torch.max)
+spectrogram_transform = nn.Sequential(PowerToDecibelTransform(torch.max), ScaleToIntervalTransform())
 dataset = ChoralSingingDataset('data', model.receptive_field, n_mels=64, n_fft=400, spectrogram_transform=spectrogram_transform)
 # Calculate the splits
 length_train = int(0.99 * len(dataset))
