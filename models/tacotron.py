@@ -119,6 +119,7 @@ class CBHG(nn.Module):
             bidirectional=True)
 
     def forward(self, x, sequence_lengths=None):
+        # Expect batch first
         batch_size, seq_len, num_channels = x.size()
         assert num_channels == self.num_channels
 
@@ -144,6 +145,7 @@ class CBHG(nn.Module):
         if sequence_lengths is not None:
             out, _ = nn.utils.rnn.pad_packed_sequence(
                 out, batch_first=True)
+        # Out shape is (batch_size, seq_len, num_channels)
         return out
 
 
@@ -174,7 +176,7 @@ class Encoder(nn.Module):
         return out
 
 
-def get_mask_from_lengths(lengths, max_length=None):
+def get_mask_from_lengths(lengths):
     # Given a length tensor, create masks
     max_len = torch.max(lengths).item()
     ids = torch.arange(0, max_len, out=torch.LongTensor(max_len))
@@ -278,7 +280,8 @@ class Postnet(nn.Module):
         self.convolutions = nn.Sequential(*convolutions)
 
     def forward(self, x):
-        return self.convolutions(x)
+        x = x.transpose(1, 2)
+        return self.convolutions(x).transpose(1, 2)
 
 
 class Decoder(nn.Module):
@@ -405,13 +408,13 @@ class Decoder(nn.Module):
     def forward(self, encoder_out, decoder_inputs, memory_lengths):
         """
         Assume the shapes:
-        - encoder_out (batch, embedding_dim, time_in)
-        - decoder_inputs (batch, hidden_dim, time_out)
+        - encoder_out (batch, time_in, embedding_dim)
+        - decoder_inputs (batch, time_out, hidden_dim)
         - memory_lengths (time_in,)
         """
         # Seq-first order for RNNs
         go_frame = self.init_go_frame(encoder_out).unsqueeze(0)
-        decoder_inputs = decoder_inputs.permute(2, 0, 1)
+        decoder_inputs = decoder_inputs.transpose(0, 1)
         # decoder_inputs shape is now (time_out, batch, hidden_dim)
         decoder_inputs = torch.cat((go_frame, decoder_inputs), dim=0)
         decoder_inputs = self.pre_net(decoder_inputs)
@@ -428,8 +431,8 @@ class Decoder(nn.Module):
             stops.append(stop.squeeze(1))
             alignments.append(attn_weights)
         # Shape of outputs is (time_out, batch, hidden_dim)
-        outputs = torch.stack(outputs).permute(
-            1, 2, 0).contiguous()  # to (batch, hidden_dim, time)
+        outputs = torch.stack(outputs).transpose(
+            0, 1).contiguous()  # to (batch, time, hidden_dim)
         # Shape of stops is (time_out, batch)
         stops = torch.stack(stops).permute(
             1, 0).contiguous()  # to (batch, time)
@@ -443,7 +446,7 @@ class Decoder(nn.Module):
         """
         Perform inference
         Assume the shapes:
-        - encoder_out (batch, embedding_dim, time_in)
+        - encoder_out (batch, time_in, embedding_dim)
         """
         decoder_input = self.init_go_frame(encoder_out)
         self.init_rnn_states(encoder_out, None)
@@ -464,8 +467,8 @@ class Decoder(nn.Module):
             warnings.warn("Max decoder steps reached", UserWarning)
 
         # Shape of outputs is (time_out, batch, hidden_dim)
-        outputs = torch.stack(outputs).permute(
-            1, 2, 0).contiguous()  # to (batch, hidden_dim, time)
+        outputs = torch.stack(outputs).transpose(
+            0, 1).contiguous()  # to (batch, time, hidden_dim)
         # Shape of stops is (time_out, batch)
         stops = torch.stack(stops).permute(
             1, 0).contiguous()  # to (batch, time)
@@ -527,8 +530,8 @@ class Tacotron(nn.Module):
 
         Shapes:
         - text_inputs (batch, sequence)
-        - text_lengths list
-        - mels (batch, channels, time)
+        - text_lengths (batch,)
+        - mels (batch, time, channels)
         - max_len int
         - output_lengths list
         """

@@ -248,7 +248,7 @@ class VocalData:
 
 
 class VocalSetDataset(Dataset):
-    def __init__(self, root='data', n_fft=400, n_mels=64, spectrogram_transform=None, rebuild_cache=False, note_transform=None):
+    def __init__(self, root='data', n_fft=400, n_mels=64, spectrogram_transform=None, rebuild_cache=False, note_transform=None, exclude=[]):
         self.root = root
         self.subfolder = 'VocalSet'
         self.scores_subfolder = 'VocalSetScores'
@@ -270,6 +270,8 @@ class VocalSetDataset(Dataset):
             "o": "OW",
             "u": "UW"
         }
+        # Other stuff
+        self.exclude = exclude
         # Make the root directory if it doesn't exist
         if not path.exists(self.root):
             print(f"Creating root directory {self.root}")
@@ -302,6 +304,9 @@ class VocalSetDataset(Dataset):
                 shutil.rmtree(self.cache_dir)
             os.mkdir(self.cache_dir)
             data_paths = glob.glob(f"{self.dataset_directory}/data_by_singer/**/*.wav", recursive=True)
+            for exclusion in self.exclude:
+                data_paths = filter(lambda path: exclusion not in path, data_paths)
+            data_paths = list(data_paths)
             tqdm_iterator = tqdm(data_paths)
             for data_path in tqdm_iterator:
                 # Process the wave data
@@ -342,6 +347,7 @@ class VocalSetDataset(Dataset):
                     score_path += f"/{vocalise}.musicxml"
                     score = parse_musicxml(score_path, constant_phoneme=self.vowel2arpabet[vowel])
                 notes = score["P1"]["notes"]
+                assert notes is not None, f"None notes at {filename}"
                 data = VocalData(singer, vocalise, technique, vowel, excerpt, notes, wave, melspec)
                 orig_cache_filename = f"{self.cache_dir}/{singer}_{vocalise}_{technique}_{vowel or excerpt}"
                 cache_filename = orig_cache_filename + ".pt"
@@ -354,6 +360,9 @@ class VocalSetDataset(Dataset):
             print(f"Saved {len(self.data_paths)} samples to cache")
         else:
             self.data_paths = glob.glob(f"{self.cache_dir}/*.pt")
+            for exclusion in self.exclude:
+                self.data_paths = filter(lambda path: exclusion not in path, self.data_paths)
+            self.data_paths = list(self.data_paths)
             print(f"Found {len(self.data_paths)} samples in cache")
     
     def __len__(self):
