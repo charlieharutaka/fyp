@@ -1,5 +1,4 @@
 TACOTRON_HP = {
-    "num_embeddings": 100,
     "embedding_dim": 256,
     "encoder_p_dropout": 0.5,
     "hidden_dim": 256,

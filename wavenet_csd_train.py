@@ -52,8 +52,8 @@ criterion = nn.CrossEntropyLoss()
 
 # The Dataset
 # We want to normalize the data using box-cox and z-score normalization
-# spectrogram_transform = nn.Sequential(BoxCoxTransform(0.1), ZScoreTransform())
-spectrogram_transform = nn.Sequential(PowerToDecibelTransform(torch.max), ScaleToIntervalTransform())
+spectrogram_transform = nn.Sequential(BoxCoxTransform(0.05), ZScoreTransform())
+# spectrogram_transform = nn.Sequential(PowerToDecibelTransform(torch.max), ScaleToIntervalTransform())
 dataset = ChoralSingingDataset('data', model.receptive_field, n_mels=64, n_fft=400, spectrogram_transform=spectrogram_transform)
 # Calculate the splits
 length_train = int(0.99 * len(dataset))
@@ -63,7 +63,7 @@ dataset_train, dataset_valid = random_split(dataset, [length_train, length_valid
 loader_train = DataLoader(dataset_train, batch_size=BATCH_SIZE, shuffle=True)
 loader_valid = DataLoader(dataset_valid, batch_size=BATCH_SIZE, shuffle=False)
 
-MODEL_NAME = "wavenet.csd3.p2d"
+MODEL_NAME = "wavenet.csd3.bcz"
 
 print(f"=====\nTraining Samples/Batches: {length_train}/{len(loader_train)}\nTesting Samples/Batches: {length_valid}/{len(loader_valid)}")
 print(f"=====\nTraining {MODEL_NAME}...")
