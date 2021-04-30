@@ -78,10 +78,12 @@ def train_conditional_wavenet(model,
 
             # Validate if we need to
             if loader_val is not None and validate_every > 0 and counter % validate_every == 0:
-                last_validation_score = eval_conditional_wavenet(model, loader_val, criterion, encoder, device)
+                last_validation_score = eval_conditional_wavenet(
+                    model, loader_val, criterion, encoder, device)
                 validation_scores.append(last_validation_score)
                 if writer is not None:
-                    writer.add_scalar("Validation Score", last_validation_score, counter - 1)
+                    writer.add_scalar("Validation Score",
+                                      last_validation_score, counter - 1)
 
             # Stats
             loss_item = loss.item()
@@ -104,3 +106,27 @@ def train_conditional_wavenet(model,
             counter += 1
 
     return train_losses, validation_scores
+
+
+# def train_tacotron(model,
+#                    optimizer,
+#                    criterion,
+#                    epochs,
+#                    loader_train,
+#                 #    loader_val=None,
+#                    epochs_start=0,
+#                    print_every=1000,
+#                    save_every=10000,
+#                    validate_every=1000,
+#                    save_as=None,
+#                    writer=None,
+#                    device=torch.device("cpu")):
+#     # Count from 1
+#     counter = 1
+#     train_losses = []
+#     running_loss = 0.0
+
+#     for epoch in range(epochs_start, epochs_start + epochs):
+#         model.train()
+#         for t, batch in enumerate(loader_train):
+

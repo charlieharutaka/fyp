@@ -1,14 +1,22 @@
 import math
 import os
 from os import path
+import shutil
 from zipfile import ZipFile
-from collections import Counter
+from collections import Counter, namedtuple
+import glob
+from dataclasses import dataclass
+from typing import List
 
 import gdown
 import torch
 import torch.nn.functional as F
+from torch.utils import data
 from torch.utils.data import Dataset
 import torchaudio
+from tqdm import tqdm
+
+from .musicxml import parse_musicxml, Note
 
 class SegmentedAudioDataset(Dataset):
     def __init__(self, audio_data, receptive_field, segment_size=32):
@@ -225,3 +233,164 @@ class ChoralSingingDataset(Dataset):
         # specs = torch.cat([data[2].narrow(2, idx, 1)[0].expand(-1, spec_expand_idx_lens[idx]) if idx >= 0 and idx < max_spec_len else torch.zeros((self.n_mels, spec_expand_idx_lens[idx])) for idx in sorted(spec_expand_idx_lens.keys())], dim=1
 
         return (input, target, specs,  data[3], data[4], data[5])
+
+
+@dataclass
+class VocalData:
+    singer: str
+    vocalise: str
+    technique: str
+    vowel: str
+    excerpt: str
+    notes: List[Note]
+    wave: torch.Tensor
+    mel: torch.Tensor
+
+
+class VocalSetDataset(Dataset):
+    def __init__(self, root='data', n_fft=400, n_mels=64, spectrogram_transform=None, rebuild_cache=False, note_transform=None):
+        self.root = root
+        self.subfolder = 'VocalSet'
+        self.scores_subfolder = 'VocalSetScores'
+        self.dataset_directory = f'./{self.root}/{self.subfolder}'
+        self.dataset_scores_directory = f'./{self.root}/{self.scores_subfolder}'
+        self.dataset_zipfile = f'./{self.root}/{self.subfolder}.zip'
+        self.dataset_scores_zipfile = f'./{self.root}/{self.scores_subfolder}.zip'
+        self.cache_dir = f"{self.dataset_directory}/cache"
+        # Transforms
+        self.resample = torchaudio.transforms.Resample(44100, 16000)
+        self.melspec = torchaudio.transforms.MelSpectrogram(16000, n_fft=n_fft, n_mels=n_mels)
+        self.spectrogram_transform = spectrogram_transform
+        self.note_transform = note_transform
+        # Some arpabet things
+        self.vowel2arpabet = {
+            "a": "AA",
+            "e": "EH",
+            "i": "IY",
+            "o": "OW",
+            "u": "UW"
+        }
+        # Make the root directory if it doesn't exist
+        if not path.exists(self.root):
+            print(f"Creating root directory {self.root}")
+            os.makedirs(self.root)
+        if not path.exists(self.dataset_directory):
+            # Assume it's not dowloaded. Download it from google drive
+            if not path.exists(self.dataset_zipfile):
+                print(f"Downloading dataset to {self.dataset_zipfile}")
+                gdown.download(
+                    'https://drive.google.com/uc?id=1Ub5nHimDoyuz91azl3iuOidX7zB-ySbf', output=self.dataset_zipfile)
+            # The zip file exists but it hasn't been extracted
+            print(f"Extracting dataset to {self.dataset_directory}")
+            with ZipFile(self.dataset_zipfile) as z:
+                z.extractall(self.dataset_directory)
+        if not path.exists(self.dataset_scores_directory):
+            # Assume it's not dowloaded. Download it from google drive
+            if not path.exists(self.dataset_scores_zipfile):
+                print(f"Downloading dataset scores to {self.dataset_scores_zipfile}")
+                gdown.download(
+                    'https://drive.google.com/uc?id=1Hf879juSGqYN3Y0rFmL6cbEwwIlrHa9e', output=self.dataset_scores_zipfile)
+            # The zip file exists but it hasn't been extracted
+            print(f"Extracting dataset to {self.dataset_scores_directory}")
+            with ZipFile(self.dataset_scores_zipfile) as z:
+                z.extractall(self.dataset_scores_directory)
+        # Build the vocal data
+        if not path.exists(self.cache_dir) or rebuild_cache:
+            self.data_paths = []
+            print("Building dataset cache...")
+            if path.exists(self.cache_dir) and rebuild_cache:
+                shutil.rmtree(self.cache_dir)
+            os.mkdir(self.cache_dir)
+            data_paths = glob.glob(f"{self.dataset_directory}/data_by_singer/**/*.wav", recursive=True)
+            tqdm_iterator = tqdm(data_paths)
+            for data_path in tqdm_iterator:
+                # Process the wave data
+                data_path = path.normpath(data_path)
+                wave, sr = torchaudio.load(data_path)
+                assert sr == 44100, f"Unexpected sample rate {sr}"
+                wave = wave[0]
+                wave = self.resample(wave)
+                melspec = self.melspec(wave).transpose(0, 1)
+
+                split_path = []
+                while data_path != "":
+                    data_path, folder = path.split(data_path)
+                    split_path.insert(0, folder)
+                filename = split_path.pop()
+                technique = split_path.pop()
+                vocalise = split_path.pop()
+                singer = split_path.pop()
+
+                score_path = self.dataset_scores_directory
+                if vocalise == "excerpts":
+                    excerpt = filename.split("_")[-2].strip()
+                    vowel = None
+                    score_path += f"/excerpts_{excerpt}.musicxml"
+                    score = parse_musicxml(score_path)
+                else:
+                    filename_split = filename.split("_")
+                    vowel = filename_split[-1].split(".")[0]
+                    if vowel not in self.vowel2arpabet.keys():
+                        tqdm_iterator.set_description(f"Skipping badly-formed file {filename}")
+                        continue
+                    excerpt = None
+                    if vocalise != "long_tones":
+                        key = filename_split[2]
+                        if key != "f":
+                            key = "c"
+                        vocalise = vocalise + "_" + key
+                    score_path += f"/{vocalise}.musicxml"
+                    score = parse_musicxml(score_path, constant_phoneme=self.vowel2arpabet[vowel])
+                notes = score["P1"]["notes"]
+                data = VocalData(singer, vocalise, technique, vowel, excerpt, notes, wave, melspec)
+                orig_cache_filename = f"{self.cache_dir}/{singer}_{vocalise}_{technique}_{vowel or excerpt}"
+                cache_filename = orig_cache_filename + ".pt"
+                ctr = 1
+                while path.exists(cache_filename):
+                    cache_filename = orig_cache_filename + f"_{ctr}.pt"
+                    ctr += 1
+                torch.save(data, cache_filename)
+                self.data_paths.append(cache_filename)
+            print(f"Saved {len(self.data_paths)} samples to cache")
+        else:
+            self.data_paths = glob.glob(f"{self.cache_dir}/*.pt")
+            print(f"Found {len(self.data_paths)} samples in cache")
+    
+    def __len__(self):
+        return len(self.data_paths)
+
+    def __getitem__(self, index):
+        path_to_load = self.data_paths[index]
+        data = torch.load(path_to_load, map_location='cpu')
+        if callable(self.spectrogram_transform):
+            data.mel = self.spectrogram_transform(data.mel)
+        if callable(self.note_transform):
+            data.notes = self.note_transform(data.notes)
+        return data
+        
+
+def vocal_data_collate_fn(data: List[VocalData]):
+    singers = []
+    vocalises = []
+    techniques = []
+    vowels = []
+    excerpts = []
+    notes = []
+    waves = []
+    wave_lens = []
+    mels = []
+    mel_lens = []
+    for sample in data:
+        singers.append(sample.singer)
+        vocalises.append(sample.vocalise)
+        techniques.append(sample.technique)
+        vowels.append(sample.vowel)
+        excerpts.append(sample.excerpt)
+        notes.append(sample.notes)
+        waves.append(sample.wave)
+        wave_lens.append(len(sample.wave))
+        mels.append(sample.mel)
+        mel_lens.append(len(sample.mel))
+    waves = torch.nn.utils.rnn.pad_sequence(waves, batch_first=True)
+    mels = torch.nn.utils.rnn.pad_sequence(mels, batch_first=True)
+    return singers, vocalises, techniques, vowels, excerpts, notes, waves, wave_lens, mels, mel_lens
