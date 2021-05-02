@@ -2,6 +2,7 @@ from collections import namedtuple
 from dataclasses import dataclass
 from typing import List
 from xml.etree import ElementTree
+from warnings import warn
 
 
 from .arpabet import ARPABET, ARPABET_CONSONANTS
@@ -30,10 +31,19 @@ def pitch2note(step, octave, accidental='natural'):
 
 def parse_musicxml(musicxml_file, constant_phoneme=None, lyric_number=2):
     root = ElementTree.parse(musicxml_file).getroot()
+    tempo_elem = (root.findall(".//*[@tempo]"))
+    if len(tempo_elem) > 1:
+        warn("Only the first tempo element will be used", UserWarning)
+    if len(tempo_elem) < 1:
+        warn("Tempo will default to 80BPM", UserWarning)
+        tempo = 80
+    else:
+        tempo = int(tempo_elem[0].attrib['tempo'])
     parts = {}
     for part in root.findall('part-list/score-part'):
         parts[part.attrib['id']] = {'name': part.find('part-name').text}
     for part_id in parts.keys():
+        parts[part_id]['tempo'] = tempo
         part = root.find(f'part[@id="{part_id}"]')
         measures = part.findall('measure')
         parsed_notes = []
@@ -42,6 +52,15 @@ def parse_musicxml(musicxml_file, constant_phoneme=None, lyric_number=2):
             notes = measure.findall('note')
             for note in notes:
                 duration = int(note.find("duration").text)
+
+                # We have to deal with tuplets
+                time_mod = note.find("time-modification")
+                if time_mod:
+                    normal_notes = int(time_mod.find("normal-notes").text)
+                    actual_notes = int(time_mod.find("actual-notes").text)
+                    modification = normal_notes / actual_notes
+                    duration *= modification
+
                 is_rest = note.find("rest") is not None
                 if not is_rest:
                     pitch = note.find("pitch")

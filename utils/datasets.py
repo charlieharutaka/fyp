@@ -242,6 +242,7 @@ class VocalData:
     technique: str
     vowel: str
     excerpt: str
+    tempo: int
     notes: List[Note]
     wave: torch.Tensor
     mel: torch.Tensor
@@ -341,14 +342,16 @@ class VocalSetDataset(Dataset):
                     excerpt = None
                     if vocalise != "long_tones":
                         key = filename_split[2]
+                        speed = "fast" if "fast" in technique else "slow"
                         if key != "f":
                             key = "c"
-                        vocalise = vocalise + "_" + key
+                        vocalise = vocalise + "_" + key + "_" + speed
                     score_path += f"/{vocalise}.musicxml"
                     score = parse_musicxml(score_path, constant_phoneme=self.vowel2arpabet[vowel])
+                tempo = score["P1"]["tempo"]
                 notes = score["P1"]["notes"]
                 assert notes is not None, f"None notes at {filename}"
-                data = VocalData(singer, vocalise, technique, vowel, excerpt, notes, wave, melspec)
+                data = VocalData(singer, vocalise, technique, vowel, excerpt, tempo, notes, wave, melspec)
                 orig_cache_filename = f"{self.cache_dir}/{singer}_{vocalise}_{technique}_{vowel or excerpt}"
                 cache_filename = orig_cache_filename + ".pt"
                 ctr = 1
