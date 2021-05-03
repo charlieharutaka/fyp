@@ -175,6 +175,45 @@ class Encoder(nn.Module):
         return out
 
 
+class EncoderV2(nn.Module):
+    """
+    TacoTron2 Encoder.
+    """
+
+    def __init__(self, input_dim=256, output_dim=256, p_dropout=0.5, n_convolutions=3, kernel_size=5):
+        self.conv_banks = nn.Sequential(*[
+            nn.Sequential(
+                nn.Conv1d(input_dim if i == 0 else output_dim, output_dim, kernel_size,
+                          padding=((kernel_size - 1) // 2)),
+                nn.BatchNorm1d(output_dim),
+                nn.ReLU(),
+                nn.Dropout(p_dropout))
+            for i in range(n_convolutions)
+        ])
+        self.lstm = nn.LSTM(input_size=output_dim, hidden_dim=(
+            output_dim // 2), batch_first=True, bidirectional=True)
+    
+    def forward(self, x, input_lengths):
+        # x of shape (batch, features, sequence)
+        x = self.conv_banks(x)
+        x = x.transpose(1, 2)
+        # x of shape (batch, sequence, features)
+        x = nn.utils.rnn.pack_padded_sequence(x, input_lengths, batch_first=True)
+        self.lstm.flatten_parameters()
+        x, _ = self.lstm(x)
+        x = nn.utils.rnn.pad_packed_sequence(x, batch_first=True)
+        return x
+
+    def infer(self, x):
+        # x of shape (1, features, sequence)
+        x = self.conv_banks(x)
+        x = x.transpose(1, 2)
+        # x of shape (batch, sequence, features)
+        self.lstm.flatten_parameters()
+        x, _ = self.lstm(x)
+        return x
+
+
 def get_mask_from_lengths(lengths):
     # Given a length tensor, create masks
     max_len = torch.max(lengths).item()
@@ -196,7 +235,7 @@ class LocationLayer(nn.Module):
                  attention_dim):
         super(LocationLayer, self).__init__()
         padding = (kernel_size - 1) // 2
-        self.location_conv = nn.Conv1d(
+        self.conv = nn.Conv1d(
             in_channels=2,
             out_channels=n_filters,
             kernel_size=kernel_size,
@@ -204,15 +243,15 @@ class LocationLayer(nn.Module):
             bias=False,
             stride=1,
             dilation=1)
-        self.location_dense = nn.Linear(
+        self.fc = nn.Linear(
             n_filters,
             attention_dim,
             bias=False)
 
     def forward(self, attention):
-        attention = self.location_conv(attention)
+        attention = self.conv(attention)
         attention = attention.transpose(1, 2)
-        attention = self.location_dense(attention)
+        attention = self.fc(attention)
         return attention
 
 
@@ -484,6 +523,8 @@ class Tacotron(nn.Module):
                  num_embeddings,
                  num_note_embeddings=128,
                  embedding_dim=256,
+                 encoder_n_convolutions=3,
+                 encoder_kernel_size=5,
                  encoder_p_dropout=0.5,
                  hidden_dim=256,
                  attention_dim=128,
@@ -507,9 +548,11 @@ class Tacotron(nn.Module):
         # self.note_embedding = nn.Embedding(
         #     num_embeddings=num_note_embeddings, embedding_dim=embedding_dim)
         self.note_embedding = nn.Linear(1, embedding_dim)
-        self.encoder = Encoder(input_dim=2 * embedding_dim,
+        self.encoder = EncoderV2(input_dim=2 * embedding_dim,
                                output_dim=embedding_dim,
-                               p_dropout=encoder_p_dropout)
+                               p_dropout=encoder_p_dropout,
+                               n_convolutions=encoder_n_convolutions,
+                               kernel_size=encoder_kernel_size)
         self.decoder = Decoder(hidden_dim=hidden_dim,
                                embedding_dim=embedding_dim,
                                attention_dim=attention_dim,
@@ -541,7 +584,7 @@ class Tacotron(nn.Module):
         """
         embedded_notes = self.note_embedding(note_inputs.to(torch.float).unsqueeze(-1))
         embedded_inputs = self.embedding(lyric_inputs)
-        encoder_inputs = torch.cat([embedded_notes, embedded_inputs], dim=-1)
+        encoder_inputs = torch.cat([embedded_notes, embedded_inputs], dim=-1).transpose(1, 2)
         encoder_outputs = self.encoder(encoder_inputs)
         outputs, stops, alignments = self.decoder(
             encoder_outputs, mels, input_lengths)
