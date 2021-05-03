@@ -152,23 +152,22 @@ class CBHG(nn.Module):
 class Encoder(nn.Module):
     """
     TacoTron encoder.
-    1. Embedding (256)
     2. Pre-net:
         1. Linear(256) > ReLU > Dropout(0.5)
         2. Linear(256) > ReLU > Dropout(0.5)
     3. CBHG as above
     """
 
-    def __init__(self, embedding_dim=256, p_dropout=0.5):
+    def __init__(self, input_dim=256, output_dim=256, p_dropout=0.5):
         super(Encoder, self).__init__()
         self.prenet = nn.Sequential(
-            nn.Linear(embedding_dim, embedding_dim),
+            nn.Linear(input_dim, output_dim),
             nn.ReLU(),
             nn.Dropout(p_dropout),
-            nn.Linear(embedding_dim, embedding_dim),
+            nn.Linear(output_dim, output_dim),
             nn.ReLU(),
             nn.Dropout(p_dropout))
-        self.cbhg = CBHG(embedding_dim)
+        self.cbhg = CBHG(output_dim)
 
     def forward(self, x):
         out = self.prenet(x)
@@ -179,7 +178,8 @@ class Encoder(nn.Module):
 def get_mask_from_lengths(lengths):
     # Given a length tensor, create masks
     max_len = torch.max(lengths).item()
-    ids = torch.arange(0, max_len, out=lengths.new_empty((max_len,), dtype=torch.long))
+    ids = torch.arange(0, max_len, out=lengths.new_empty(
+        (max_len,), dtype=torch.long))
     mask = (ids < lengths.unsqueeze(1)).bool()
     return mask
 
@@ -456,10 +456,10 @@ class Decoder(nn.Module):
             decoder_input = self.pre_net(decoder_input)
             output, stop, alignment = self.decode(decoder_input)
             outputs.append(output.squeeze(1))
-            stops.append(stop)
+            stops.append(stop.squeeze(1))
             alignments.append(alignment)
 
-            if torch.sigmoid(stop.item()) > self.stopping_threshold:
+            if torch.sigmoid(stop).item() > self.stopping_threshold:
                 break
 
             decoder_input = output
@@ -482,6 +482,7 @@ class Decoder(nn.Module):
 class Tacotron(nn.Module):
     def __init__(self,
                  num_embeddings,
+                 num_note_embeddings=128,
                  embedding_dim=256,
                  encoder_p_dropout=0.5,
                  hidden_dim=256,
@@ -503,7 +504,11 @@ class Tacotron(nn.Module):
         super(Tacotron, self).__init__()
         self.embedding = nn.Embedding(
             num_embeddings, embedding_dim=embedding_dim)
-        self.encoder = Encoder(embedding_dim=embedding_dim,
+        # self.note_embedding = nn.Embedding(
+        #     num_embeddings=num_note_embeddings, embedding_dim=embedding_dim)
+        self.note_embedding = nn.Linear(1, embedding_dim)
+        self.encoder = Encoder(input_dim=2 * embedding_dim,
+                               output_dim=embedding_dim,
                                p_dropout=encoder_p_dropout)
         self.decoder = Decoder(hidden_dim=hidden_dim,
                                embedding_dim=embedding_dim,
@@ -524,21 +529,40 @@ class Tacotron(nn.Module):
                                kernel_size=postnet_kernel_size,
                                p_dropout=postnet_p_dropout)
 
-    def forward(self, text_inputs, text_lengths, mels):
+    def forward(self, note_inputs, lyric_inputs, input_lengths, mels):
         """
         Teacher-forcing training.
 
         Shapes:
-        - text_inputs (batch, sequence)
-        - text_lengths (batch,)
+        - note_inputs (batch, sequence)
+        - lyric_inputs (batch, sequence)
+        - input_lengths (batch,)
         - mels (batch, time, channels)
-        - max_len int
-        - output_lengths list
         """
-        embedded_inputs = self.embedding(text_inputs)
-        encoder_outputs = self.encoder(embedded_inputs)
+        embedded_notes = self.note_embedding(note_inputs.to(torch.float).unsqueeze(-1))
+        embedded_inputs = self.embedding(lyric_inputs)
+        encoder_inputs = torch.cat([embedded_notes, embedded_inputs], dim=-1)
+        encoder_outputs = self.encoder(encoder_inputs)
         outputs, stops, alignments = self.decoder(
-            encoder_outputs, mels, text_lengths)
+            encoder_outputs, mels, input_lengths)
+        outputs_postnet = self.postnet(outputs)
+        outputs_postnet = outputs + outputs_postnet
+
+        return outputs, outputs_postnet, stops, alignments
+
+    def infer(self, note_inputs, lyric_inputs):
+        """
+        Inference.
+
+        Shapes:
+        - note_inputs (1, sequence)
+        - lyric_inputs (1, sequence)
+        """
+        embedded_notes = self.note_embedding(note_inputs.to(torch.float).unsqueeze(-1))
+        embedded_inputs = self.embedding(lyric_inputs)
+        encoder_inputs = torch.cat([embedded_notes, embedded_inputs], dim=-1)
+        encoder_outputs = self.encoder(encoder_inputs)
+        outputs, stops, alignments = self.decoder.infer(encoder_outputs)
         outputs_postnet = self.postnet(outputs)
         outputs_postnet = outputs + outputs_postnet
 
