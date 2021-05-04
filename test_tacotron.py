@@ -12,7 +12,8 @@ import matplotlib.pyplot as plt
 
 from models.tacotron import Tacotron
 from utils.datasets import VocalSetDataset, vocal_data_collate_fn
-from utils.arpabet import ARPABET, ArpabetEncoding
+from utils.arpabet import ARPABET, ArpabetEncoding, START, END
+from utils.musicxml import Note
 from utils.transforms import PowerToDecibelTransform, ScaleToIntervalTransform
 from hparams import TACOTRON_HP
 
@@ -30,7 +31,19 @@ BATCH_SIZE=8
 print(f"Batch size: {BATCH_SIZE}")
 
 encoding = ArpabetEncoding()
-note_transform = lambda notes: (torch.cat([torch.full((len(note.lyric),), note.pitch) for note in notes]), torch.cat([torch.tensor([encoding.encode(phoneme) for phoneme in note.lyric]) for note in notes]))
+
+def note_transform(notes):
+    notes = [Note(0, 0, [START]), *notes, Note(0, 0, [END])]
+    lyrics = []
+    pitches = []
+    rhythms = []
+    for note in notes:
+        for phoneme in note.lyric:
+            lyrics.append(encoding.encode(phoneme))
+            pitches.append(note.pitch)
+            rhythms.append(note.duration / len(note.lyric))
+    return list(zip(lyrics, pitches, rhythms))
+
 spectrogram_transform = nn.Sequential(PowerToDecibelTransform(torch.max)) #, ScaleToIntervalTransform())
 # spectrogram_transform = None
 dataset = VocalSetDataset(n_fft=800, n_mels=128, spectrogram_transform=spectrogram_transform, note_transform=note_transform, exclude=["excerpts"])
@@ -41,10 +54,43 @@ loader_train = DataLoader(dataset_train, batch_size=BATCH_SIZE, shuffle=True, co
 loader_val = DataLoader(dataset_val, batch_size=BATCH_SIZE, shuffle=False, collate_fn=vocal_data_collate_fn)
 
 fixed_sample = dataset[0]
-fixed_notes = fixed_sample.notes[0].unsqueeze(0).to(device)
-fixed_lyrics = fixed_sample.notes[1].unsqueeze(0).to(device)
-fixed_notes_len = torch.tensor(fixed_notes.shape[1]).unsqueeze(0).to(device)
+fixed_notes = list(zip(*fixed_sample.notes))
+fixed_lyrics = torch.tensor(fixed_notes[0]).unsqueeze(0).to(device)
+fixed_pitches = torch.tensor(fixed_notes[1]).unsqueeze(0).to(device)
+fixed_rhythm = torch.tensor(fixed_notes[2]).unsqueeze(0).to(device)
+fixed_notes_len = torch.tensor(fixed_lyrics.shape[1]).unsqueeze(0).to(device)
 fixed_mel = fixed_sample.mel.unsqueeze(0).to(device)
+
+def prepare_data(batch):
+    notes_lens = batch[6]
+    lyrics = []
+    pitches = []
+    rhythms = []
+    for notes in batch[5]:
+        lyric, pitch, rhythm = zip(*notes)
+        lyrics.append(torch.tensor(lyric))
+        pitches.append(torch.tensor(pitch))
+        rhythms.append(torch.tensor(rhythm))
+    notes_lens = torch.tensor(notes_lens)
+
+    lyrics = nn.utils.rnn.pad_sequence(lyrics, batch_first=True)
+    pitches = nn.utils.rnn.pad_sequence(pitches, batch_first=True)
+    rhythms = nn.utils.rnn.pad_sequence(rhythms, batch_first=True)
+
+    mels = batch[9]
+    mel_lens = batch[10]
+    gate_targets = mels.new_zeros((mels.shape[0], mels.shape[1]))
+    for batch, mel_len in enumerate(mel_lens):
+        gate_targets[batch,mel_len - 1:] = 1.0
+
+    lyrics = lyrics.to(device)
+    pitches = pitches.to(device)
+    rhythms = rhythms.to(device)
+    notes_lens = notes_lens.to(device)
+    mels = mels.to(device)
+    gate_targets = gate_targets.to(device)
+
+    return lyrics, pitches, rhythms, notes_lens, mels, gate_targets
 
 print(f"Training with {len(loader_train)} batches")
 
@@ -52,7 +98,7 @@ print("==========")
 
 tacotron_hp = { **TACOTRON_HP, "hidden_dim": 128 }
 
-model = Tacotron(num_embeddings=len(ARPABET), **tacotron_hp)
+model = Tacotron(num_embeddings=len(encoding), **tacotron_hp)
 model.to(device)
 params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print("Total number of parameters is: {}".format(params))
@@ -76,30 +122,13 @@ for epoch in range(1, NUM_EPOCHS + 1):
     model.train()
     for t, batch in enumerate(loader_train, 1):
         optimizer.zero_grad()
-        notes_lens = []
-        notes_lyrics = batch[5]
-        notes_lyrics = tuple(zip(*notes_lyrics))
-        for notes in notes_lyrics[0]:
-            notes_lens.append(len(notes))
-        notes_lens = torch.tensor(notes_lens)
-        notes = nn.utils.rnn.pad_sequence(notes_lyrics[0], batch_first=True)
-        lyrics = nn.utils.rnn.pad_sequence(notes_lyrics[1], batch_first=True)
-        mels = batch[8]
-        mel_lens = batch[9]
-        gate_targets = mels.new_zeros((mels.shape[0], mels.shape[1]))
-        for batch, mel_len in enumerate(mel_lens):
-            gate_targets[batch,mel_len - 1:] = 1.0
 
-        notes = notes.to(device)
-        lyrics = lyrics.to(device)
-        notes_lens = notes_lens.to(device)
-        mels = mels.to(device)
-        gate_targets = gate_targets.to(device)
+        lyrics, pitches, rhythms, notes_lens, mels, gate_targets = prepare_data(batch)
 
         # notes shape: (batch, sequence)
         # Mels shape: (batch, sequence, hidden_dim)
 
-        output, output_postnet, gate_preds, alignments = model(notes, lyrics, notes_lens, mels)
+        output, output_postnet, gate_preds, alignments = model(lyrics, pitches, rhythms, notes_lens, mels)
         mel_loss = mel_criterion(output, mels)
         postnet_loss = postnet_criterion(output_postnet, mels)
         gate_loss = gate_criterion(gate_preds, gate_targets)
@@ -124,30 +153,12 @@ for epoch in range(1, NUM_EPOCHS + 1):
         gate_losses = []
         losses = []
         for t, batch in enumerate(loader_val, 1):
-            notes_lens = []
-            notes_lyrics = batch[5]
-            notes_lyrics = tuple(zip(*notes_lyrics))
-            for notes in notes_lyrics[0]:
-                notes_lens.append(len(notes))
-            notes_lens = torch.tensor(notes_lens)
-            notes = nn.utils.rnn.pad_sequence(notes_lyrics[0], batch_first=True)
-            lyrics = nn.utils.rnn.pad_sequence(notes_lyrics[1], batch_first=True)
-            mels = batch[8]
-            mel_lens = batch[9]
-            gate_targets = mels.new_zeros((mels.shape[0], mels.shape[1]))
-            for batch, mel_len in enumerate(mel_lens):
-                gate_targets[batch,mel_len - 1:] = 1.0
-
-            notes = notes.to(device)
-            lyrics = lyrics.to(device)
-            notes_lens = notes_lens.to(device)
-            mels = mels.to(device)
-            gate_targets = gate_targets.to(device)
+            lyrics, pitches, rhythms, notes_lens, mels, gate_targets = prepare_data(batch)
 
             # notes shape: (batch, sequence)
             # Mels shape: (batch, sequence, hidden_dim)
 
-            output, output_postnet, gate_preds, alignments = model(notes, lyrics, notes_lens, mels)
+            output, output_postnet, gate_preds, alignments = model(lyrics, pitches, rhythms, notes_lens, mels)
             mel_loss = mel_criterion(output, mels)
             postnet_loss = postnet_criterion(output_postnet, mels)
             gate_loss = gate_criterion(gate_preds, gate_targets)
@@ -165,7 +176,7 @@ for epoch in range(1, NUM_EPOCHS + 1):
 
         print(f"Validation Loss: {sum(losses) / len(losses)}")
 
-        output, output_postnet, gate_preds, alignments = model.infer(fixed_notes, fixed_lyrics)
+        output, output_postnet, gate_preds, alignments = model.infer(fixed_lyrics, fixed_pitches, fixed_rhythm)
 
         # Alignment illustration
         fig, ax = plt.subplots(figsize=(10,5))

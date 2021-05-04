@@ -2,6 +2,7 @@ import warnings
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.modules.dropout import Dropout
 
 
 class HighwayLayer(nn.Module):
@@ -181,6 +182,7 @@ class EncoderV2(nn.Module):
     """
 
     def __init__(self, input_dim=256, output_dim=256, p_dropout=0.5, n_convolutions=3, kernel_size=5):
+        super(EncoderV2, self).__init__()
         self.conv_banks = nn.Sequential(*[
             nn.Sequential(
                 nn.Conv1d(input_dim if i == 0 else output_dim, output_dim, kernel_size,
@@ -190,18 +192,20 @@ class EncoderV2(nn.Module):
                 nn.Dropout(p_dropout))
             for i in range(n_convolutions)
         ])
-        self.lstm = nn.LSTM(input_size=output_dim, hidden_dim=(
+        self.lstm = nn.LSTM(input_size=output_dim, hidden_size=(
             output_dim // 2), batch_first=True, bidirectional=True)
-    
+
     def forward(self, x, input_lengths):
+        input_lengths = input_lengths.cpu().to(torch.int64)
         # x of shape (batch, features, sequence)
         x = self.conv_banks(x)
         x = x.transpose(1, 2)
         # x of shape (batch, sequence, features)
-        x = nn.utils.rnn.pack_padded_sequence(x, input_lengths, batch_first=True)
+        x = nn.utils.rnn.pack_padded_sequence(
+            x, input_lengths, batch_first=True)
         self.lstm.flatten_parameters()
         x, _ = self.lstm(x)
-        x = nn.utils.rnn.pad_packed_sequence(x, batch_first=True)
+        x, _ = nn.utils.rnn.pad_packed_sequence(x, batch_first=True)
         return x
 
     def infer(self, x):
@@ -212,6 +216,102 @@ class EncoderV2(nn.Module):
         self.lstm.flatten_parameters()
         x, _ = self.lstm(x)
         return x
+
+
+class TemporalEncoder(nn.Module):
+    """
+    Encoder implementing rhythmic & pitch information into the output of the RNN.
+    """
+
+    def __init__(self, num_embeddings, lyric_dim=256, pitch_dim=256, rhythm_dim=256, output_dim=256, p_dropout=0.5, n_convolutions=3, kernel_size=5):
+        super(TemporalEncoder, self).__init__()
+        self.embedding = nn.Embedding(num_embeddings, lyric_dim)
+        self.pitch_proj = nn.Linear(1, pitch_dim)
+        self.rhythm_proj = nn.Linear(1, rhythm_dim)
+
+        self.conv_banks = nn.ModuleList([
+            nn.Sequential(*[
+                nn.Sequential(
+                    nn.Conv1d(dim, dim, kernel_size,
+                              padding=((kernel_size - 1) // 2)),
+                    nn.BatchNorm1d(output_dim),
+                    nn.ReLU(),
+                    nn.Dropout(p_dropout))
+                for _ in range(n_convolutions)])
+            for dim in [lyric_dim, pitch_dim, rhythm_dim]
+        ])
+
+        self.lstm_lyrics = nn.LSTM(
+            input_size=lyric_dim, hidden_size=(lyric_dim // 2), batch_first=True, bidirectional=True)
+        self.lstm_pitch = nn.LSTM(
+            input_size=lyric_dim + pitch_dim, hidden_size=(pitch_dim // 2), batch_first=True, bidirectional=True)
+        self.lstm_rhythm = nn.LSTM(
+            input_size=pitch_dim + rhythm_dim, hidden_size=(rhythm_dim // 2), batch_first=True, bidirectional=True)
+        self.output_proj = nn.Sequential(
+            nn.Linear(rhythm_dim, output_dim),
+            nn.Tanh(),
+            nn.Dropout(p_dropout))
+
+    def forward(self, lyrics, pitches, rhythms, input_lengths):
+        input_lengths = input_lengths.cpu().to(torch.int64)
+        # all (batch, seq)
+        lyrics = self.embedding(lyrics).transpose(1, 2)
+        pitches = self.pitch_proj(pitches.to(torch.float).unsqueeze(-1)).transpose(1, 2)
+        rhythms = self.rhythm_proj(rhythms.to(torch.float).unsqueeze(-1)).transpose(1, 2)
+        # all (batch, feature, seq)
+        lyrics = self.conv_banks[0](lyrics).transpose(1, 2)
+        pitches = self.conv_banks[1](pitches).transpose(1, 2)
+        rhythms = self.conv_banks[2](rhythms).transpose(1, 2)
+        # all (batch, seq, feature)
+        # do some crazy stuff
+        lyrics = nn.utils.rnn.pack_padded_sequence(
+            lyrics, input_lengths, batch_first=True)
+        self.lstm_lyrics.flatten_parameters()
+        lyrics, _ = self.lstm_lyrics(lyrics)
+        lyrics, _ = nn.utils.rnn.pad_packed_sequence(lyrics, batch_first=True)
+
+        pitches = torch.cat([lyrics, pitches], dim=-1)
+        pitches = nn.utils.rnn.pack_padded_sequence(
+            pitches, input_lengths, batch_first=True)
+        self.lstm_pitch.flatten_parameters()
+        pitches, _ = self.lstm_pitch(pitches)
+        pitches, _ = nn.utils.rnn.pad_packed_sequence(
+            pitches, batch_first=True)
+
+        rhythms = torch.cat([pitches, rhythms], dim=-1)
+        rhythms = nn.utils.rnn.pack_padded_sequence(
+            rhythms, input_lengths, batch_first=True)
+        self.lstm_rhythm.flatten_parameters()
+        rhythms, _ = self.lstm_rhythm(rhythms)
+        rhythms, _ = nn.utils.rnn.pad_packed_sequence(
+            rhythms, batch_first=True)
+        output = self.output_proj(rhythms)
+        return output
+
+    def infer(self, lyrics, pitches, rhythms):
+        # all (1, seq)
+        lyrics = self.embedding(lyrics).transpose(1, 2)
+        pitches = self.pitch_proj(pitches.to(torch.float).unsqueeze(-1)).transpose(1, 2)
+        rhythms = self.rhythm_proj(rhythms.to(torch.float).unsqueeze(-1)).transpose(1, 2)
+        # all (1, feature, seq)
+        lyrics = self.conv_banks[0](lyrics).transpose(1, 2)
+        pitches = self.conv_banks[1](pitches).transpose(1, 2)
+        rhythms = self.conv_banks[2](rhythms).transpose(1, 2)
+        # all (1, seq, feature)
+        # do some crazy stuff
+        self.lstm_lyrics.flatten_parameters()
+        lyrics, _ = self.lstm_lyrics(lyrics)
+
+        pitches = torch.cat([lyrics, pitches], dim=-1)
+        self.lstm_pitch.flatten_parameters()
+        pitches, _ = self.lstm_pitch(pitches)
+
+        rhythms = torch.cat([pitches, rhythms], dim=-1)
+        self.lstm_rhythm.flatten_parameters()
+        rhythms, _ = self.lstm_rhythm(rhythms)
+        output = self.output_proj(rhythms)
+        return output
+
 
 
 def get_mask_from_lengths(lengths):
@@ -521,7 +621,9 @@ class Decoder(nn.Module):
 class Tacotron(nn.Module):
     def __init__(self,
                  num_embeddings,
-                 num_note_embeddings=128,
+                 encoder_lyric_dim=256,
+                 encoder_pitch_dim=256,
+                 encoder_rhythm_dim=256,
                  embedding_dim=256,
                  encoder_n_convolutions=3,
                  encoder_kernel_size=5,
@@ -543,16 +645,24 @@ class Tacotron(nn.Module):
                  postnet_kernel_size=5,
                  postnet_p_dropout=0.5):
         super(Tacotron, self).__init__()
-        self.embedding = nn.Embedding(
-            num_embeddings, embedding_dim=embedding_dim)
+        # self.embedding = nn.Embedding(
+        #     num_embeddings, embedding_dim=embedding_dim)
         # self.note_embedding = nn.Embedding(
         #     num_embeddings=num_note_embeddings, embedding_dim=embedding_dim)
-        self.note_embedding = nn.Linear(1, embedding_dim)
-        self.encoder = EncoderV2(input_dim=2 * embedding_dim,
-                               output_dim=embedding_dim,
-                               p_dropout=encoder_p_dropout,
-                               n_convolutions=encoder_n_convolutions,
-                               kernel_size=encoder_kernel_size)
+        # self.note_embedding = nn.Linear(1, embedding_dim)
+        # self.encoder = EncoderV2(input_dim=2 * embedding_dim,
+        #                          output_dim=embedding_dim,
+        #                          p_dropout=encoder_p_dropout,
+        #                          n_convolutions=encoder_n_convolutions,
+        #                          kernel_size=encoder_kernel_size)
+        self.encoder = TemporalEncoder(num_embeddings,
+                                       lyric_dim=encoder_lyric_dim,
+                                       pitch_dim=encoder_pitch_dim,
+                                       rhythm_dim=encoder_rhythm_dim,
+                                       output_dim=embedding_dim,
+                                       p_dropout=encoder_p_dropout,
+                                       n_convolutions=encoder_n_convolutions,
+                                       kernel_size=encoder_kernel_size)
         self.decoder = Decoder(hidden_dim=hidden_dim,
                                embedding_dim=embedding_dim,
                                attention_dim=attention_dim,
@@ -572,7 +682,7 @@ class Tacotron(nn.Module):
                                kernel_size=postnet_kernel_size,
                                p_dropout=postnet_p_dropout)
 
-    def forward(self, note_inputs, lyric_inputs, input_lengths, mels):
+    def forward(self, lyric_inputs, note_inputs, duration_inputs, input_lengths, mels):
         """
         Teacher-forcing training.
 
@@ -582,10 +692,13 @@ class Tacotron(nn.Module):
         - input_lengths (batch,)
         - mels (batch, time, channels)
         """
-        embedded_notes = self.note_embedding(note_inputs.to(torch.float).unsqueeze(-1))
-        embedded_inputs = self.embedding(lyric_inputs)
-        encoder_inputs = torch.cat([embedded_notes, embedded_inputs], dim=-1).transpose(1, 2)
-        encoder_outputs = self.encoder(encoder_inputs)
+        # embedded_notes = self.note_embedding(
+        #     note_inputs.to(torch.float).unsqueeze(-1))
+        # embedded_inputs = self.embedding(lyric_inputs)
+        # encoder_inputs = torch.cat(
+        #     [embedded_notes, embedded_inputs], dim=-1).transpose(1, 2)
+        # encoder_outputs = self.encoder(encoder_inputs, input_lengths)
+        encoder_outputs = self.encoder(lyric_inputs, note_inputs, duration_inputs, input_lengths)
         outputs, stops, alignments = self.decoder(
             encoder_outputs, mels, input_lengths)
         outputs_postnet = self.postnet(outputs)
@@ -593,7 +706,7 @@ class Tacotron(nn.Module):
 
         return outputs, outputs_postnet, stops, alignments
 
-    def infer(self, note_inputs, lyric_inputs):
+    def infer(self, lyric_inputs, note_inputs, duration_inputs):
         """
         Inference.
 
@@ -601,10 +714,13 @@ class Tacotron(nn.Module):
         - note_inputs (1, sequence)
         - lyric_inputs (1, sequence)
         """
-        embedded_notes = self.note_embedding(note_inputs.to(torch.float).unsqueeze(-1))
-        embedded_inputs = self.embedding(lyric_inputs)
-        encoder_inputs = torch.cat([embedded_notes, embedded_inputs], dim=-1)
-        encoder_outputs = self.encoder(encoder_inputs)
+        # embedded_notes = self.note_embedding(
+        #     note_inputs.to(torch.float).unsqueeze(-1))
+        # embedded_inputs = self.embedding(lyric_inputs)
+        # encoder_inputs = torch.cat(
+        #     [embedded_notes, embedded_inputs], dim=-1).transpose(1, 2)
+        # encoder_outputs = self.encoder.infer(encoder_inputs)
+        encoder_outputs = self.encoder.infer(lyric_inputs, note_inputs, duration_inputs)
         outputs, stops, alignments = self.decoder.infer(encoder_outputs)
         outputs_postnet = self.postnet(outputs)
         outputs_postnet = outputs + outputs_postnet

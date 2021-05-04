@@ -11,7 +11,6 @@ from typing import List
 import gdown
 import torch
 import torch.nn.functional as F
-from torch.utils import data
 from torch.utils.data import Dataset
 import torchaudio
 from tqdm import tqdm
@@ -379,15 +378,16 @@ class VocalSetDataset(Dataset):
         if callable(self.note_transform):
             data.notes = self.note_transform(data.notes)
         return data
-        
 
 def vocal_data_collate_fn(data: List[VocalData]):
+    data.sort(reverse=True, key=lambda sample: len(sample.notes))
     singers = []
     vocalises = []
     techniques = []
     vowels = []
     excerpts = []
     notes = []
+    notes_lens = []
     waves = []
     wave_lens = []
     mels = []
@@ -399,10 +399,11 @@ def vocal_data_collate_fn(data: List[VocalData]):
         vowels.append(sample.vowel)
         excerpts.append(sample.excerpt)
         notes.append(sample.notes)
+        notes_lens.append(len(sample.notes))
         waves.append(sample.wave)
         wave_lens.append(len(sample.wave))
         mels.append(sample.mel)
         mel_lens.append(len(sample.mel))
     waves = torch.nn.utils.rnn.pad_sequence(waves, batch_first=True)
     mels = torch.nn.utils.rnn.pad_sequence(mels, batch_first=True)
-    return singers, vocalises, techniques, vowels, excerpts, notes, waves, wave_lens, mels, mel_lens
+    return singers, vocalises, techniques, vowels, excerpts, notes, notes_lens, waves, wave_lens, mels, mel_lens

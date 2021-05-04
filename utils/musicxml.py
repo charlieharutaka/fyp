@@ -5,7 +5,7 @@ from xml.etree import ElementTree
 from warnings import warn
 
 
-from .arpabet import ARPABET, ARPABET_CONSONANTS
+from .arpabet import ARPABET, ARPABET_CONSONANTS, SILENCE
 
 
 @dataclass
@@ -95,6 +95,6 @@ def parse_musicxml(musicxml_file, constant_phoneme=None, lyric_number=2):
                     note = pitch2note(step, octave, accidental)
                     parsed_notes.append(Note(note, duration, lyric))
                 else:
-                    parsed_notes.append(Note(None, duration, None))
+                    parsed_notes.append(Note(0, duration, [SILENCE]))
         parts[part_id]['notes'] = parsed_notes
     return parts
