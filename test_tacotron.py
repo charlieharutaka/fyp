@@ -26,7 +26,7 @@ else:
 
 print("==========")
 
-BATCH_SIZE=4
+BATCH_SIZE=8
 
 print(f"Batch size: {BATCH_SIZE}")
 
@@ -45,16 +45,11 @@ def note_transform(notes):
     return list(zip(lyrics, pitches, rhythms))
 
 def dynamic_range_compression(x, C=1, clip_val=1e-5):
-    """
-    PARAMS
-    ------
-    C: compression factor
-    """
     return torch.log(torch.clamp(x, min=clip_val) * C)
 
 spectrogram_transform = dynamic_range_compression # nn.Sequential(dynamic_range_compression) #, ScaleToIntervalTransform())
 # spectrogram_transform = None
-dataset = VocalSetDataset(n_fft=512, n_mels=80, spectrogram_transform=spectrogram_transform, note_transform=note_transform, exclude=[])
+dataset = VocalSetDataset(n_fft=800, n_mels=128, spectrogram_transform=spectrogram_transform, note_transform=note_transform, exclude=[])
 length_train = int(len(dataset) * 0.9)
 length_val = len(dataset) - length_train
 dataset_train, dataset_val = random_split(dataset, (length_train, length_val))
@@ -147,6 +142,7 @@ PRINT_EVERY = 10
 EPOCH_LEN = len(loader_train)
 
 writer = SummaryWriter(f'runs/tacotron/{datetime.now().strftime("%b%d_%H-%M-%S_kaguya")}')
+writer.add_text("Notes", "n_fft=800, n_mels=128, with multiple attention layers")
 model.train()
 for epoch in range(1, NUM_EPOCHS + 1):
     print(f"=== Epoch {epoch} ===")
@@ -163,7 +159,7 @@ for epoch in range(1, NUM_EPOCHS + 1):
         output, output_postnet, gate_preds, alignments = model(lyrics, pitches, rhythms, notes_lens, mels)
         mel_loss = mel_criterion(output, mels)
         postnet_loss = postnet_criterion(output_postnet, mels)
-        gate_loss = gate_criterion(gate_preds, gate_targets)
+        gate_loss = gate_criterion(gate_preds.view(-1, 1), gate_targets.view(-1, 1))
         loss = mel_loss + postnet_loss + gate_loss
         loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -212,7 +208,7 @@ for epoch in range(1, NUM_EPOCHS + 1):
 
         # Alignment illustration
         fig, ax = plt.subplots(figsize=(10,5))
-        im = ax.imshow(alignments[0].detach().cpu().transpose(0, 1), aspect='auto', origin='lower', interpolation='nearest')
+        im = ax.imshow(alignments[0][0].detach().cpu().transpose(0, 1), aspect='auto', origin='lower', interpolation='nearest')
         fig.colorbar(im)
         writer.add_figure("Alignment", fig, epoch - 1)
         # Spectrogram illustration

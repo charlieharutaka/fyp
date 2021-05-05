@@ -382,6 +382,7 @@ class Postnet(nn.Module):
 
 class DecoderCell(nn.Module):
     def __init__(self,
+                 num_encoders=1,
                  embedding_dim=256,
                  attention_dim=128,
                  prenet_dim=128,
@@ -394,6 +395,7 @@ class DecoderCell(nn.Module):
                  hidden_dim=256):
         super(DecoderCell, self).__init__()
         # Keep params
+        self.num_encoders = num_encoders # number of encoded streams
         self.hidden_dim = hidden_dim  # n_mel_channels
         self.embedding_dim = embedding_dim  # encoder_embedding_dim
         self.attention_dim = attention_dim
@@ -406,16 +408,20 @@ class DecoderCell(nn.Module):
         self.prenet_dim = prenet_dim
         # Layers
         # Memory layer to process encoder outputs
-        self.memory_layer = nn.Linear(embedding_dim, attention_dim, bias=False)
+        self.memories_layer = nn.ModuleList(
+            [nn.Linear(embedding_dim, attention_dim, bias=False) for _ in range(self.num_encoders)])
         # Attention modules
-        self.attention_rnn = nn.LSTMCell(
-            embedding_dim + prenet_dim, attention_rnn_dim)
+        self.attention_rnns = nn.ModuleList()
+        self.attention_layers = nn.ModuleList()
         self.attention_dropout = nn.Dropout(p_attention_dropout)
-        self.attention_layer = AttentionLayer(
-            attention_dim,
-            attention_rnn_dim,
-            attention_location_n_filters,
-            attention_location_kernel_size)
+        for _ in range(self.num_encoders):
+            self.attention_rnns.append(nn.LSTMCell(
+                embedding_dim + prenet_dim, attention_rnn_dim))
+            self.attention_layers.append(AttentionLayer(
+                attention_dim,
+                attention_rnn_dim,
+                attention_location_n_filters,
+                attention_location_kernel_size))
         # Decoder modules
         self.decoder_rnn = nn.LSTMCell(
             attention_rnn_dim + embedding_dim, decoder_rnn_dim)
@@ -428,64 +434,78 @@ class DecoderCell(nn.Module):
 
     def init_go_frame(self, encoder_out):
         # Initializes the 0 frame signalling the start of the sample
-        batch_size = encoder_out.shape[0]
-        return encoder_out.new_zeros((batch_size, self.hidden_dim), requires_grad=True)
+        batch_size = encoder_out[0].shape[0]
+        return encoder_out[0].new_zeros((batch_size, self.hidden_dim), requires_grad=True)
 
-    def init_rnn_states(self, encoder_out, mask):
+    def init_rnn_states(self, encoder_out, masks):
         # Initialize all the RNN hidden states
-        batch_size, max_steps, _ = encoder_out.shape
+        batch_size, max_steps, _ = encoder_out[0].shape
         # Attention hidden states
-        self.attention_hidden = encoder_out.new_zeros(
-            (batch_size, self.attention_rnn_dim), requires_grad=True)
-        self.attention_cell = encoder_out.new_zeros(
-            (batch_size, self.attention_rnn_dim), requires_grad=True)
-        # Decoder hidden states
-        self.decoder_hidden = encoder_out.new_zeros(
-            (batch_size, self.decoder_rnn_dim), requires_grad=True)
-        self.decoder_cell = encoder_out.new_zeros(
-            (batch_size, self.decoder_rnn_dim), requires_grad=True)
+        self.attention_hidden = [encoder_out[i].new_zeros(
+            (batch_size, self.attention_rnn_dim), requires_grad=True) for i in range(self.num_encoders)]
+        self.attention_cell = [encoder_out[i].new_zeros(
+            (batch_size, self.attention_rnn_dim), requires_grad=True) for i in range(self.num_encoders)]
         # Attention weights
-        self.attention_weights = encoder_out.new_zeros(
-            (batch_size, max_steps), requires_grad=True)
-        self.attention_weights_cum = encoder_out.new_zeros(
-            (batch_size, max_steps), requires_grad=True)
-        self.attention_context = encoder_out.new_zeros(
-            (batch_size, self.embedding_dim))
+        self.attention_weights = [encoder_out[i].new_zeros(
+            (batch_size, max_steps), requires_grad=True) for i in range(self.num_encoders)]
+        self.attention_weights_cum = [encoder_out[i].new_zeros(
+            (batch_size, max_steps), requires_grad=True) for i in range(self.num_encoders)]
+        self.attention_context = [encoder_out[i].new_zeros(
+            (batch_size, self.embedding_dim)) for i in range(self.num_encoders)]
+        # Decoder hidden states
+        self.decoder_hidden = encoder_out[0].new_zeros(
+            (batch_size, self.decoder_rnn_dim), requires_grad=True)
+        self.decoder_cell = encoder_out[0].new_zeros(
+            (batch_size, self.decoder_rnn_dim), requires_grad=True)
 
-        self.memory = encoder_out
-        self.processed_memory = self.memory_layer(encoder_out)
-        self.mask = mask
+        self.memories = encoder_out
+        self.processed_memories = []
+        for i, memory in enumerate(encoder_out):
+            processed_memory = self.memories_layer[i](memory)
+            self.processed_memories.append(processed_memory)
+        self.masks = masks
 
     def forward(self, last_frame):
+        # Do attention for each of the encoder streans
+        for i in range(self.num_encoders):
         # Concatenate the previous decoder frame with the current attention context in the channel dimension
-        attention_in = torch.cat([last_frame, self.attention_context], dim=-1)
-        self.attention_hidden, self.attention_cell = self.attention_rnn(
-            attention_in, (self.attention_hidden, self.attention_cell))
-        self.attention_hidden = self.attention_dropout(self.attention_hidden)
-        # Concatenate the current and cumulative attention weights in the channel(?) dimension
-        attention_weights = torch.cat([
-            self.attention_weights.unsqueeze(1),
-            self.attention_weights_cum.unsqueeze(1)], dim=1)
-        self.attention_context, self.attention_weights = self.attention_layer(
-            self.attention_hidden, self.memory, self.processed_memory,
-            attention_weights, self.mask)
-        # Update the cumulative attention weights
-        self.attention_weights_cum = self.attention_weights_cum + self.attention_weights
+            attention_in = torch.cat([last_frame, self.attention_context[i]], dim=-1)
+            attention_hidden, attention_cell = self.attention_rnns[i](
+                attention_in, (self.attention_hidden[i], self.attention_cell[i]))
+            self.attention_cell[i] = attention_cell
+            self.attention_hidden[i] = self.attention_dropout(attention_hidden)
+            # Concatenate the current and cumulative attention weights in the channel(?) dimension
+            attention_weights = torch.cat([
+                self.attention_weights[i].unsqueeze(1),
+                self.attention_weights_cum[i].unsqueeze(1)], dim=1)
+            attention_context, attention_weights = self.attention_layers[i](
+                self.attention_hidden[i], self.memories[i], self.processed_memories[i],
+                attention_weights, self.masks[i])
+            self.attention_context[i] = attention_context
+            self.attention_weights[i] = attention_weights
+            # Update the cumulative attention weights
+            self.attention_weights_cum[i] = self.attention_weights_cum[i] + self.attention_weights[i]
+        # Combine the hidden and context states by addition
+        attention_hidden = 0
+        for h in self.attention_hidden:
+            attention_hidden = attention_hidden + h
+        attention_context = 0
+        for c in self.attention_context:
+            attention_context = attention_context + c
         # Concatenate the attention hidden state and attention context in the channel dimension
-        decoder_in = torch.cat([
-            self.attention_hidden, self.attention_context], dim=-1)
+        decoder_in = torch.cat([attention_hidden, attention_context], dim=-1)
         self.decoder_hidden, self.decoder_cell = self.decoder_rnn(
             decoder_in, (self.decoder_hidden, self.decoder_cell))
         self.decoder_hidden = self.decoder_dropout(self.decoder_hidden)
         # Produce the next frame by concatenating the hidden state and attention context and using the projection layer
         decoder_hidden_attention_context = torch.cat([
-            self.decoder_hidden, self.attention_context], dim=1)
+            self.decoder_hidden, attention_context], dim=1)
         decoder_output = self.linear_projection(
             decoder_hidden_attention_context)
         # Get a stopping prediction
         stop_prediction = self.gate(decoder_hidden_attention_context)
 
-        return decoder_output, stop_prediction, self.attention_weights
+        return decoder_output, stop_prediction, torch.stack(self.attention_weights, dim=1)
 
 
 class Decoder(nn.Module):
@@ -507,7 +527,7 @@ class Decoder(nn.Module):
             stopping_threshold=0.5):
         super(Decoder, self).__init__()
         # Keep params
-        self.num_encoders
+        self.num_encoders = num_encoders
         self.hidden_dim = hidden_dim  # n_mel_channels
         self.embedding_dim = embedding_dim  # encoder_embedding_dim
         self.attention_dim = attention_dim
@@ -531,6 +551,7 @@ class Decoder(nn.Module):
             nn.Dropout(p_prenet_dropout))
         # Attention modules
         self.cell = DecoderCell(
+            num_encoders=num_encoders,
             embedding_dim=embedding_dim,
             attention_dim=attention_dim,
             prenet_dim=prenet_dim,
@@ -542,12 +563,12 @@ class Decoder(nn.Module):
             p_decoder_dropout=p_decoder_dropout,
             hidden_dim=hidden_dim)
 
-    def forward(self, encoder_out, decoder_inputs, memory_lengths):
+    def forward(self, encoder_out, decoder_inputs, memory_lengths_list):
         """
         Assume the shapes:
-        - encoder_out (batch, time_in, embedding_dim)
+        - encoder_out (num_encoders, batch, time_in, embedding_dim)
         - decoder_inputs (batch, time_out, hidden_dim)
-        - memory_lengths (time_in,)
+        - memory_lengths_list (num_encoders, time_in,)
         """
         # Seq-first order for RNNs
         go_frame = self.cell.init_go_frame(encoder_out).unsqueeze(0)
@@ -557,7 +578,7 @@ class Decoder(nn.Module):
         decoder_inputs = self.pre_net(decoder_inputs)
 
         self.cell.init_rnn_states(
-            encoder_out, mask=~get_mask_from_lengths(memory_lengths))
+            encoder_out, masks=[~get_mask_from_lengths(memory_lengths) for memory_lengths in memory_lengths_list])
 
         outputs, stops, alignments = [], [], []
         while len(outputs) < decoder_inputs.size(0) - 1:
@@ -574,7 +595,8 @@ class Decoder(nn.Module):
             1, 0).contiguous()  # to (batch, time)
         # Shape of alignments is (time_out, batch)
         alignments = torch.stack(alignments).permute(
-            1, 0, 2).contiguous()  # to (batch, time_out, time_in)
+            2, 1, 0, 3).contiguous()  # to (num_encoders, batch, time_out, time_in)
+        print(alignments.shape)
 
         return outputs, stops, alignments
 
@@ -582,7 +604,7 @@ class Decoder(nn.Module):
         """
         Perform inference
         Assume the shapes:
-        - encoder_out (batch, time_in, embedding_dim)
+        - encoder_out (num_encoders, batch, time_in, embedding_dim)
         """
         decoder_input = self.cell.init_go_frame(encoder_out)
         self.cell.init_rnn_states(encoder_out, None)
@@ -618,6 +640,7 @@ class Decoder(nn.Module):
 class Tacotron(nn.Module):
     def __init__(self,
                  num_embeddings,
+                 num_encoders=1,
                  encoder_lyric_dim=256,
                  encoder_pitch_dim=256,
                  encoder_rhythm_dim=256,
@@ -660,7 +683,8 @@ class Tacotron(nn.Module):
                                        p_dropout=encoder_p_dropout,
                                        n_convolutions=encoder_n_convolutions,
                                        kernel_size=encoder_kernel_size)
-        self.decoder = Decoder(hidden_dim=hidden_dim,
+        self.decoder = Decoder(num_encoders=num_encoders,
+                               hidden_dim=hidden_dim,
                                embedding_dim=embedding_dim,
                                attention_dim=attention_dim,
                                attention_rnn_dim=attention_rnn_dim,
@@ -698,7 +722,7 @@ class Tacotron(nn.Module):
         encoder_outputs = self.encoder(
             lyric_inputs, note_inputs, duration_inputs, input_lengths)
         outputs, stops, alignments = self.decoder(
-            encoder_outputs, mels, input_lengths)
+            [encoder_outputs], mels, [input_lengths])
         outputs_postnet = self.postnet(outputs)
         outputs_postnet = outputs + outputs_postnet
 
@@ -720,7 +744,7 @@ class Tacotron(nn.Module):
         # encoder_outputs = self.encoder.infer(encoder_inputs)
         encoder_outputs = self.encoder.infer(
             lyric_inputs, note_inputs, duration_inputs)
-        outputs, stops, alignments = self.decoder.infer(encoder_outputs)
+        outputs, stops, alignments = self.decoder.infer([encoder_outputs])
         outputs_postnet = self.postnet(outputs)
         outputs_postnet = outputs + outputs_postnet
 
