@@ -1,5 +1,10 @@
 TACOTRON_HP = {
+    "encoder_lyric_dim": 256,
+    "encoder_pitch_dim": 256,
+    "encoder_rhythm_dim": 256,
     "embedding_dim": 256,
+    "encoder_n_convolutions": 3,
+    "encoder_kernel_size": 5,
     "encoder_p_dropout": 0.5,
     "hidden_dim": 256,
     "attention_dim": 128,

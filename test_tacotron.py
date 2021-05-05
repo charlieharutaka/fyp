@@ -26,7 +26,7 @@ else:
 
 print("==========")
 
-BATCH_SIZE=8
+BATCH_SIZE=4
 
 print(f"Batch size: {BATCH_SIZE}")
 
@@ -44,9 +44,17 @@ def note_transform(notes):
             rhythms.append(note.duration / len(note.lyric))
     return list(zip(lyrics, pitches, rhythms))
 
-spectrogram_transform = nn.Sequential(PowerToDecibelTransform(torch.max)) #, ScaleToIntervalTransform())
+def dynamic_range_compression(x, C=1, clip_val=1e-5):
+    """
+    PARAMS
+    ------
+    C: compression factor
+    """
+    return torch.log(torch.clamp(x, min=clip_val) * C)
+
+spectrogram_transform = dynamic_range_compression # nn.Sequential(dynamic_range_compression) #, ScaleToIntervalTransform())
 # spectrogram_transform = None
-dataset = VocalSetDataset(n_fft=800, n_mels=128, spectrogram_transform=spectrogram_transform, note_transform=note_transform, exclude=["excerpts"])
+dataset = VocalSetDataset(n_fft=512, n_mels=80, spectrogram_transform=spectrogram_transform, note_transform=note_transform, exclude=[])
 length_train = int(len(dataset) * 0.9)
 length_val = len(dataset) - length_train
 dataset_train, dataset_val = random_split(dataset, (length_train, length_val))
@@ -96,7 +104,31 @@ print(f"Training with {len(loader_train)} batches")
 
 print("==========")
 
-tacotron_hp = { **TACOTRON_HP, "hidden_dim": 128 }
+tacotron_hp = {
+    "encoder_lyric_dim": 256,
+    "encoder_pitch_dim": 256,
+    "encoder_rhythm_dim": 256,
+    "embedding_dim": 256,
+    "encoder_n_convolutions": 3,
+    "encoder_kernel_size": 5,
+    "encoder_p_dropout": 0,
+    "hidden_dim": 80,
+    "attention_dim": 128,
+    "attention_rnn_dim": 1024,
+    "attention_location_n_filters": 32,
+    "attention_location_kernel_size": 31,
+    "decoder_rnn_dim": 1024,
+    "p_prenet_dropout": 0.1,
+    "p_attention_dropout": 0.1,
+    "p_decoder_dropout": 0.1,
+    "prenet_dim": 128,
+    "max_decoder_steps": 1000,
+    "stopping_threshold": 0.5,
+    "postnet_n_convolutions": 5,
+    "postnet_embedding_dim": 512,
+    "postnet_kernel_size": 5,
+    "postnet_p_dropout": 0
+}
 
 model = Tacotron(num_embeddings=len(encoding), **tacotron_hp)
 model.to(device)
@@ -176,7 +208,7 @@ for epoch in range(1, NUM_EPOCHS + 1):
 
         print(f"Validation Loss: {sum(losses) / len(losses)}")
 
-        output, output_postnet, gate_preds, alignments = model.infer(fixed_lyrics, fixed_pitches, fixed_rhythm)
+        output, output_postnet, gate_preds, alignments = model(fixed_lyrics, fixed_pitches, fixed_rhythm, fixed_notes_len, fixed_mel)
 
         # Alignment illustration
         fig, ax = plt.subplots(figsize=(10,5))

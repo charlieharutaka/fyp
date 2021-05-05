@@ -229,89 +229,46 @@ class TemporalEncoder(nn.Module):
         self.pitch_proj = nn.Linear(1, pitch_dim)
         self.rhythm_proj = nn.Linear(1, rhythm_dim)
 
-        self.conv_banks = nn.ModuleList([
-            nn.Sequential(*[
-                nn.Sequential(
-                    nn.Conv1d(dim, dim, kernel_size,
-                              padding=((kernel_size - 1) // 2)),
-                    nn.BatchNorm1d(output_dim),
-                    nn.ReLU(),
-                    nn.Dropout(p_dropout))
-                for _ in range(n_convolutions)])
-            for dim in [lyric_dim, pitch_dim, rhythm_dim]
+        all_dims = lyric_dim + pitch_dim + rhythm_dim
+        self.conv_banks = nn.Sequential(*[
+            nn.Sequential(
+                nn.Conv1d(all_dims if i == 0 else output_dim, output_dim, kernel_size,
+                          padding=((kernel_size - 1) // 2)),
+                nn.BatchNorm1d(output_dim),
+                nn.ReLU(),
+                nn.Dropout(p_dropout))
+            for i in range(n_convolutions)
         ])
-
-        self.lstm_lyrics = nn.LSTM(
-            input_size=lyric_dim, hidden_size=(lyric_dim // 2), batch_first=True, bidirectional=True)
-        self.lstm_pitch = nn.LSTM(
-            input_size=lyric_dim + pitch_dim, hidden_size=(pitch_dim // 2), batch_first=True, bidirectional=True)
-        self.lstm_rhythm = nn.LSTM(
-            input_size=pitch_dim + rhythm_dim, hidden_size=(rhythm_dim // 2), batch_first=True, bidirectional=True)
-        self.output_proj = nn.Sequential(
-            nn.Linear(rhythm_dim, output_dim),
-            nn.Tanh(),
-            nn.Dropout(p_dropout))
+        self.lstm = nn.LSTM(input_size=output_dim, hidden_size=(
+            output_dim // 2), batch_first=True, bidirectional=True)
 
     def forward(self, lyrics, pitches, rhythms, input_lengths):
         input_lengths = input_lengths.cpu().to(torch.int64)
         # all (batch, seq)
-        lyrics = self.embedding(lyrics).transpose(1, 2)
-        pitches = self.pitch_proj(pitches.to(torch.float).unsqueeze(-1)).transpose(1, 2)
-        rhythms = self.rhythm_proj(rhythms.to(torch.float).unsqueeze(-1)).transpose(1, 2)
+        lyrics = self.embedding(lyrics)
+        pitches = self.pitch_proj(pitches.to(torch.float).unsqueeze(-1))
+        rhythms = self.rhythm_proj(rhythms.unsqueeze(-1))
         # all (batch, feature, seq)
-        lyrics = self.conv_banks[0](lyrics).transpose(1, 2)
-        pitches = self.conv_banks[1](pitches).transpose(1, 2)
-        rhythms = self.conv_banks[2](rhythms).transpose(1, 2)
-        # all (batch, seq, feature)
-        # do some crazy stuff
-        lyrics = nn.utils.rnn.pack_padded_sequence(
-            lyrics, input_lengths, batch_first=True)
-        self.lstm_lyrics.flatten_parameters()
-        lyrics, _ = self.lstm_lyrics(lyrics)
-        lyrics, _ = nn.utils.rnn.pad_packed_sequence(lyrics, batch_first=True)
-
-        pitches = torch.cat([lyrics, pitches], dim=-1)
-        pitches = nn.utils.rnn.pack_padded_sequence(
-            pitches, input_lengths, batch_first=True)
-        self.lstm_pitch.flatten_parameters()
-        pitches, _ = self.lstm_pitch(pitches)
-        pitches, _ = nn.utils.rnn.pad_packed_sequence(
-            pitches, batch_first=True)
-
-        rhythms = torch.cat([pitches, rhythms], dim=-1)
-        rhythms = nn.utils.rnn.pack_padded_sequence(
-            rhythms, input_lengths, batch_first=True)
-        self.lstm_rhythm.flatten_parameters()
-        rhythms, _ = self.lstm_rhythm(rhythms)
-        rhythms, _ = nn.utils.rnn.pad_packed_sequence(
-            rhythms, batch_first=True)
-        output = self.output_proj(rhythms)
+        output = torch.cat([lyrics, pitches, rhythms], dim=-1).transpose(1, 2)
+        output = self.conv_banks(output).transpose(1, 2)
+        self.lstm.flatten_parameters()
+        output = nn.utils.rnn.pack_padded_sequence(
+            output, input_lengths, batch_first=True)
+        output, _ = self.lstm(output)
+        output, _ = nn.utils.rnn.pad_packed_sequence(output, batch_first=True)
         return output
 
     def infer(self, lyrics, pitches, rhythms):
-        # all (1, seq)
-        lyrics = self.embedding(lyrics).transpose(1, 2)
-        pitches = self.pitch_proj(pitches.to(torch.float).unsqueeze(-1)).transpose(1, 2)
-        rhythms = self.rhythm_proj(rhythms.to(torch.float).unsqueeze(-1)).transpose(1, 2)
-        # all (1, feature, seq)
-        lyrics = self.conv_banks[0](lyrics).transpose(1, 2)
-        pitches = self.conv_banks[1](pitches).transpose(1, 2)
-        rhythms = self.conv_banks[2](rhythms).transpose(1, 2)
-        # all (1, seq, feature)
-        # do some crazy stuff
-        self.lstm_lyrics.flatten_parameters()
-        lyrics, _ = self.lstm_lyrics(lyrics)
-
-        pitches = torch.cat([lyrics, pitches], dim=-1)
-        self.lstm_pitch.flatten_parameters()
-        pitches, _ = self.lstm_pitch(pitches)
-
-        rhythms = torch.cat([pitches, rhythms], dim=-1)
-        self.lstm_rhythm.flatten_parameters()
-        rhythms, _ = self.lstm_rhythm(rhythms)
-        output = self.output_proj(rhythms)
+        # all (batch, seq)
+        lyrics = self.embedding(lyrics)
+        pitches = self.pitch_proj(pitches.to(torch.float).unsqueeze(-1))
+        rhythms = self.rhythm_proj(rhythms.unsqueeze(-1))
+        # all (batch, feature, seq)
+        output = torch.cat([lyrics, pitches, rhythms], dim=-1).transpose(1, 2)
+        output = self.conv_banks(output).transpose(1, 2)
+        self.lstm.flatten_parameters()
+        output, _ = self.lstm(output)
         return output
-
 
 
 def get_mask_from_lengths(lengths):
@@ -423,23 +380,19 @@ class Postnet(nn.Module):
         return self.convolutions(x).transpose(1, 2)
 
 
-class Decoder(nn.Module):
-    def __init__(
-            self,
-            hidden_dim=256,
-            embedding_dim=256,
-            attention_dim=128,
-            attention_rnn_dim=1024,
-            attention_location_n_filters=32,
-            attention_location_kernel_size=31,
-            decoder_rnn_dim=1024,
-            p_prenet_dropout=0.1,
-            p_attention_dropout=0.1,
-            p_decoder_dropout=0.1,
-            prenet_dim=128,
-            max_decoder_steps=1000,
-            stopping_threshold=0.5):
-        super(Decoder, self).__init__()
+class DecoderCell(nn.Module):
+    def __init__(self,
+                 embedding_dim=256,
+                 attention_dim=128,
+                 prenet_dim=128,
+                 attention_rnn_dim=1024,
+                 p_attention_dropout=0.1,
+                 attention_location_n_filters=32,
+                 attention_location_kernel_size=31,
+                 decoder_rnn_dim=1024,
+                 p_decoder_dropout=0.1,
+                 hidden_dim=256):
+        super(DecoderCell, self).__init__()
         # Keep params
         self.hidden_dim = hidden_dim  # n_mel_channels
         self.embedding_dim = embedding_dim  # encoder_embedding_dim
@@ -451,19 +404,9 @@ class Decoder(nn.Module):
         self.p_attention_dropout = p_attention_dropout
         self.p_decoder_dropout = p_decoder_dropout
         self.prenet_dim = prenet_dim
-        self.max_decoder_steps = max_decoder_steps
-        self.stopping_threshold = stopping_threshold
         # Layers
         # Memory layer to process encoder outputs
         self.memory_layer = nn.Linear(embedding_dim, attention_dim, bias=False)
-        # Prenet applied to each RNN state before passing it through the RNN
-        self.pre_net = nn.Sequential(
-            nn.Linear(hidden_dim, prenet_dim),
-            nn.ReLU(),
-            nn.Dropout(p_prenet_dropout),
-            nn.Linear(prenet_dim, prenet_dim),
-            nn.ReLU(),
-            nn.Dropout(p_prenet_dropout))
         # Attention modules
         self.attention_rnn = nn.LSTMCell(
             embedding_dim + prenet_dim, attention_rnn_dim)
@@ -513,7 +456,7 @@ class Decoder(nn.Module):
         self.processed_memory = self.memory_layer(encoder_out)
         self.mask = mask
 
-    def decode(self, last_frame):
+    def forward(self, last_frame):
         # Concatenate the previous decoder frame with the current attention context in the channel dimension
         attention_in = torch.cat([last_frame, self.attention_context], dim=-1)
         self.attention_hidden, self.attention_cell = self.attention_rnn(
@@ -544,6 +487,61 @@ class Decoder(nn.Module):
 
         return decoder_output, stop_prediction, self.attention_weights
 
+
+class Decoder(nn.Module):
+    def __init__(
+            self,
+            num_encoders=1,
+            hidden_dim=256,
+            embedding_dim=256,
+            attention_dim=128,
+            attention_rnn_dim=1024,
+            attention_location_n_filters=32,
+            attention_location_kernel_size=31,
+            decoder_rnn_dim=1024,
+            p_prenet_dropout=0.1,
+            p_attention_dropout=0.1,
+            p_decoder_dropout=0.1,
+            prenet_dim=128,
+            max_decoder_steps=1000,
+            stopping_threshold=0.5):
+        super(Decoder, self).__init__()
+        # Keep params
+        self.num_encoders
+        self.hidden_dim = hidden_dim  # n_mel_channels
+        self.embedding_dim = embedding_dim  # encoder_embedding_dim
+        self.attention_dim = attention_dim
+        self.attention_rnn_dim = attention_rnn_dim
+        self.attention_location_n_filters = attention_location_n_filters
+        self.attention_location_kernel_size = attention_location_kernel_size
+        self.decoder_rnn_dim = decoder_rnn_dim
+        self.p_attention_dropout = p_attention_dropout
+        self.p_decoder_dropout = p_decoder_dropout
+        self.prenet_dim = prenet_dim
+        self.max_decoder_steps = max_decoder_steps
+        self.stopping_threshold = stopping_threshold
+        # Layers
+        # Prenet applied to each RNN state before passing it through the RNN
+        self.pre_net = nn.Sequential(
+            nn.Linear(hidden_dim, prenet_dim),
+            nn.ReLU(),
+            nn.Dropout(p_prenet_dropout),
+            nn.Linear(prenet_dim, prenet_dim),
+            nn.ReLU(),
+            nn.Dropout(p_prenet_dropout))
+        # Attention modules
+        self.cell = DecoderCell(
+            embedding_dim=embedding_dim,
+            attention_dim=attention_dim,
+            prenet_dim=prenet_dim,
+            attention_rnn_dim=attention_rnn_dim,
+            p_attention_dropout=p_attention_dropout,
+            attention_location_n_filters=attention_location_n_filters,
+            attention_location_kernel_size=attention_location_kernel_size,
+            decoder_rnn_dim=decoder_rnn_dim,
+            p_decoder_dropout=p_decoder_dropout,
+            hidden_dim=hidden_dim)
+
     def forward(self, encoder_out, decoder_inputs, memory_lengths):
         """
         Assume the shapes:
@@ -552,20 +550,19 @@ class Decoder(nn.Module):
         - memory_lengths (time_in,)
         """
         # Seq-first order for RNNs
-        go_frame = self.init_go_frame(encoder_out).unsqueeze(0)
+        go_frame = self.cell.init_go_frame(encoder_out).unsqueeze(0)
         decoder_inputs = decoder_inputs.transpose(0, 1)
         # decoder_inputs shape is now (time_out, batch, hidden_dim)
         decoder_inputs = torch.cat((go_frame, decoder_inputs), dim=0)
         decoder_inputs = self.pre_net(decoder_inputs)
 
-        self.init_rnn_states(
+        self.cell.init_rnn_states(
             encoder_out, mask=~get_mask_from_lengths(memory_lengths))
 
         outputs, stops, alignments = [], [], []
         while len(outputs) < decoder_inputs.size(0) - 1:
             decoder_input = decoder_inputs[len(outputs)]
-            output, stop, attn_weights = self.decode(
-                decoder_input)
+            output, stop, attn_weights = self.cell(decoder_input)
             outputs.append(output.squeeze(1))
             stops.append(stop.squeeze(1))
             alignments.append(attn_weights)
@@ -587,13 +584,13 @@ class Decoder(nn.Module):
         Assume the shapes:
         - encoder_out (batch, time_in, embedding_dim)
         """
-        decoder_input = self.init_go_frame(encoder_out)
-        self.init_rnn_states(encoder_out, None)
+        decoder_input = self.cell.init_go_frame(encoder_out)
+        self.cell.init_rnn_states(encoder_out, None)
 
         outputs, stops, alignments = [], [], []
         for i in range(self.max_decoder_steps):
             decoder_input = self.pre_net(decoder_input)
-            output, stop, alignment = self.decode(decoder_input)
+            output, stop, alignment = self.cell(decoder_input)
             outputs.append(output.squeeze(1))
             stops.append(stop.squeeze(1))
             alignments.append(alignment)
@@ -698,7 +695,8 @@ class Tacotron(nn.Module):
         # encoder_inputs = torch.cat(
         #     [embedded_notes, embedded_inputs], dim=-1).transpose(1, 2)
         # encoder_outputs = self.encoder(encoder_inputs, input_lengths)
-        encoder_outputs = self.encoder(lyric_inputs, note_inputs, duration_inputs, input_lengths)
+        encoder_outputs = self.encoder(
+            lyric_inputs, note_inputs, duration_inputs, input_lengths)
         outputs, stops, alignments = self.decoder(
             encoder_outputs, mels, input_lengths)
         outputs_postnet = self.postnet(outputs)
@@ -720,7 +718,8 @@ class Tacotron(nn.Module):
         # encoder_inputs = torch.cat(
         #     [embedded_notes, embedded_inputs], dim=-1).transpose(1, 2)
         # encoder_outputs = self.encoder.infer(encoder_inputs)
-        encoder_outputs = self.encoder.infer(lyric_inputs, note_inputs, duration_inputs)
+        encoder_outputs = self.encoder.infer(
+            lyric_inputs, note_inputs, duration_inputs)
         outputs, stops, alignments = self.decoder.infer(encoder_outputs)
         outputs_postnet = self.postnet(outputs)
         outputs_postnet = outputs + outputs_postnet
