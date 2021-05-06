@@ -58,3 +58,13 @@ class ScaleToIntervalTransform(Module):
 
     def forward(self, x):
         return self.lower + ((x - x.min()) * (self.upper - self.lower)) / (x.max() - x.min())
+
+
+class DynamicRangeCompression(Module):
+    def __init__(self, C=1, clip_val=1e-5):
+        super(DynamicRangeCompression, self).__init__()
+        self.C = C
+        self.clip_val = clip_val
+    
+    def forward(self, x):
+        return torch.log(torch.clamp(x, min=self.clip_val) * self.C)

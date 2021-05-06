@@ -259,6 +259,7 @@ class VocalSetDataset(Dataset):
         self.cache_dir = f"{self.dataset_directory}/cache"
         # Transforms
         self.resample = torchaudio.transforms.Resample(44100, 16000)
+        self.vad = torchaudio.transforms.Vad(16000, trigger_level=1.0)
         self.melspec = torchaudio.transforms.MelSpectrogram(16000, n_fft=n_fft, n_mels=n_mels, f_min=f_min, f_max=f_max, pad_mode='constant')
         self.spectrogram_transform = spectrogram_transform
         self.note_transform = note_transform
@@ -315,6 +316,8 @@ class VocalSetDataset(Dataset):
                 assert sr == 44100, f"Unexpected sample rate {sr}"
                 wave = wave[0]
                 wave = self.resample(wave)
+                wave = self.vad(wave).flip(dims=(-1,))
+                wave = self.vad(wave).flip(dims=(-1,))
                 melspec = self.melspec(wave).transpose(0, 1)
 
                 split_path = []
@@ -392,6 +395,7 @@ def vocal_data_collate_fn(data: List[VocalData]):
     wave_lens = []
     mels = []
     mel_lens = []
+    tempos = []
     for sample in data:
         singers.append(sample.singer)
         vocalises.append(sample.vocalise)
@@ -404,6 +408,7 @@ def vocal_data_collate_fn(data: List[VocalData]):
         wave_lens.append(len(sample.wave))
         mels.append(sample.mel)
         mel_lens.append(len(sample.mel))
+        tempos.append(sample.tempo)
     waves = torch.nn.utils.rnn.pad_sequence(waves, batch_first=True)
     mels = torch.nn.utils.rnn.pad_sequence(mels, batch_first=True)
-    return singers, vocalises, techniques, vowels, excerpts, notes, notes_lens, waves, wave_lens, mels, mel_lens
+    return singers, vocalises, techniques, vowels, excerpts, notes, notes_lens, waves, wave_lens, mels, mel_lens, tempos

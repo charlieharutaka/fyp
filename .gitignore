@@ -140,3 +140,6 @@ old_models/
 
 # TensorBoard
 runs/
+
+# images
+*.png

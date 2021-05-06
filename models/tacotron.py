@@ -2,7 +2,6 @@ import warnings
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.modules.dropout import Dropout
 
 
 class HighwayLayer(nn.Module):
@@ -392,7 +391,8 @@ class DecoderCell(nn.Module):
                  attention_location_kernel_size=31,
                  decoder_rnn_dim=1024,
                  p_decoder_dropout=0.1,
-                 hidden_dim=256):
+                 hidden_dim=256,
+                 conditional_dim=0):
         super(DecoderCell, self).__init__()
         # Keep params
         self.num_encoders = num_encoders  # number of encoded streams
@@ -406,6 +406,7 @@ class DecoderCell(nn.Module):
         self.p_attention_dropout = p_attention_dropout
         self.p_decoder_dropout = p_decoder_dropout
         self.prenet_dim = prenet_dim
+        self.conditional_dim = conditional_dim
         # Layers
         # Memory layer to process encoder outputs
         self.memories_layer = nn.ModuleList(
@@ -424,7 +425,7 @@ class DecoderCell(nn.Module):
                 attention_location_kernel_size))
         # Decoder modules
         self.decoder_rnn = nn.LSTMCell(
-            attention_rnn_dim + embedding_dim, decoder_rnn_dim)
+            attention_rnn_dim + embedding_dim + conditional_dim, decoder_rnn_dim)
         self.decoder_dropout = nn.Dropout(p_decoder_dropout)
         # Projection to the mel-spectrogram space
         self.linear_projection = nn.Linear(
@@ -437,7 +438,11 @@ class DecoderCell(nn.Module):
         batch_size = encoder_out[0].shape[0]
         return encoder_out[0].new_zeros((batch_size, self.hidden_dim), requires_grad=True)
 
-    def init_rnn_states(self, encoder_out, masks):
+    def init_rnn_states(self, encoder_out, masks, condition=None):
+        if condition is not None:
+            assert condition.shape[1] == self.conditional_dim, "Condition does not match the specified size"
+        else:
+            assert self.conditional_dim == 0, "No conditional dimension specified"
         # Initialize all the RNN hidden states
         batch_size, max_steps, _ = encoder_out[0].shape
         # Attention hidden states
@@ -459,6 +464,7 @@ class DecoderCell(nn.Module):
             (batch_size, self.decoder_rnn_dim), requires_grad=True)
 
         self.memories = encoder_out
+        self.condition = condition
         self.processed_memories = []
         for i, memory in enumerate(encoder_out):
             processed_memory = self.memories_layer[i](memory)
@@ -495,7 +501,12 @@ class DecoderCell(nn.Module):
         for c in self.attention_context:
             attention_context = attention_context + c
         # Concatenate the attention hidden state and attention context in the channel dimension
-        decoder_in = torch.cat([attention_hidden, attention_context], dim=-1)
+        if self.condition is not None:
+            decoder_in = torch.cat(
+                [attention_hidden, attention_context, self.condition], dim=-1)
+        else:
+            decoder_in = torch.cat(
+                [attention_hidden, attention_context], dim=-1)
         self.decoder_hidden, self.decoder_cell = self.decoder_rnn(
             decoder_in, (self.decoder_hidden, self.decoder_cell))
         self.decoder_hidden = self.decoder_dropout(self.decoder_hidden)
@@ -515,6 +526,7 @@ class Decoder(nn.Module):
             self,
             num_encoders=1,
             hidden_dim=256,
+            conditional_dim=0,
             embedding_dim=256,
             attention_dim=128,
             attention_rnn_dim=1024,
@@ -563,9 +575,10 @@ class Decoder(nn.Module):
             attention_location_kernel_size=attention_location_kernel_size,
             decoder_rnn_dim=decoder_rnn_dim,
             p_decoder_dropout=p_decoder_dropout,
-            hidden_dim=hidden_dim)
+            hidden_dim=hidden_dim,
+            conditional_dim=conditional_dim)
 
-    def forward(self, encoder_out, decoder_inputs, memory_lengths_list):
+    def forward(self, encoder_out, decoder_inputs, memory_lengths_list, condition=None):
         """
         Assume the shapes:
         - encoder_out (num_encoders, batch, time_in, embedding_dim)
@@ -580,7 +593,7 @@ class Decoder(nn.Module):
         decoder_inputs = self.pre_net(decoder_inputs)
 
         self.cell.init_rnn_states(
-            encoder_out, masks=[~get_mask_from_lengths(memory_lengths) for memory_lengths in memory_lengths_list])
+            encoder_out, masks=[~get_mask_from_lengths(memory_lengths) for memory_lengths in memory_lengths_list], condition=condition)
 
         outputs, stops, alignments = [], [], []
         while len(outputs) < decoder_inputs.size(0) - 1:
@@ -601,14 +614,14 @@ class Decoder(nn.Module):
 
         return outputs, stops, alignments
 
-    def infer(self, encoder_out):
+    def infer(self, encoder_out, condition=None):
         """
         Perform inference
         Assume the shapes:
         - encoder_out (num_encoders, batch, time_in, embedding_dim)
         """
         decoder_input = self.cell.init_go_frame(encoder_out)
-        self.cell.init_rnn_states(encoder_out, None)
+        self.cell.init_rnn_states(encoder_out, masks=[None for _ in range(self.num_encoders)], condition=condition)
 
         outputs, stops, alignments = [], [], []
         for i in range(self.max_decoder_steps):
@@ -666,8 +679,7 @@ class Tacotron(nn.Module):
         super(Tacotron, self).__init__()
         self.lyric_embedding = nn.Embedding(
             num_embeddings, embedding_dim=encoder_lyric_dim)
-        self.note_embedding = nn.Embedding(
-            128, embedding_dim=encoder_pitch_dim)
+        self.note_embedding = nn.Linear(1, encoder_pitch_dim)
         self.rhythm_embedding = nn.Linear(1, encoder_rhythm_dim)
         self.lyric_encoder = EncoderV2(input_dim=encoder_lyric_dim,
                                        output_dim=embedding_dim,
@@ -684,6 +696,7 @@ class Tacotron(nn.Module):
                                         p_dropout=encoder_p_dropout,
                                         n_convolutions=encoder_n_convolutions,
                                         kernel_size=encoder_kernel_size)
+        self.tempo_embedding = nn.Linear(1, embedding_dim)
         # self.encoder = TemporalEncoder(num_embeddings,
         #                                lyric_dim=encoder_lyric_dim,
         #                                pitch_dim=encoder_pitch_dim,
@@ -695,6 +708,7 @@ class Tacotron(nn.Module):
         self.decoder = Decoder(num_encoders=3,
                                hidden_dim=hidden_dim,
                                embedding_dim=embedding_dim,
+                               conditional_dim=embedding_dim,
                                attention_dim=attention_dim,
                                attention_rnn_dim=attention_rnn_dim,
                                attention_location_n_filters=attention_location_n_filters,
@@ -712,7 +726,7 @@ class Tacotron(nn.Module):
                                kernel_size=postnet_kernel_size,
                                p_dropout=postnet_p_dropout)
 
-    def forward(self, lyric_inputs, note_inputs, duration_inputs, input_lengths, mels):
+    def forward(self, lyric_inputs, note_inputs, duration_inputs, tempo, input_lengths, mels):
         """
         Teacher-forcing training.
 
@@ -732,20 +746,21 @@ class Tacotron(nn.Module):
         #     lyric_inputs, note_inputs, duration_inputs, input_lengths)
 
         embedded_lyrics = self.lyric_embedding(lyric_inputs)
-        embedded_notes = self.note_embedding(note_inputs)
+        embedded_notes = self.note_embedding(note_inputs.unsqueeze(-1).to(torch.float))
         embedded_rhythm = self.rhythm_embedding(duration_inputs.unsqueeze(-1))
         encoded_lyrics = self.lyric_encoder(embedded_lyrics, input_lengths)
         encoded_notes = self.lyric_encoder(embedded_notes, input_lengths)
         encoded_rhythm = self.lyric_encoder(embedded_rhythm, input_lengths)
+        embedded_tempo = self.tempo_embedding(tempo.unsqueeze(-1).to(torch.float))
 
         outputs, stops, alignments = self.decoder(
-            [encoded_lyrics, encoded_notes, encoded_rhythm], mels, [input_lengths, input_lengths, input_lengths])
+            [encoded_lyrics, encoded_notes, encoded_rhythm], mels, [input_lengths, input_lengths, input_lengths], condition=embedded_tempo)
         outputs_postnet = self.postnet(outputs)
         outputs_postnet = outputs + outputs_postnet
 
         return outputs, outputs_postnet, stops, alignments
 
-    def infer(self, lyric_inputs, note_inputs, duration_inputs):
+    def infer(self, lyric_inputs, note_inputs, duration_inputs, tempo):
         """
         Inference.
 
@@ -761,13 +776,101 @@ class Tacotron(nn.Module):
         # encoder_outputs = self.encoder.infer(encoder_inputs)
 
         embedded_lyrics = self.lyric_embedding(lyric_inputs)
-        embedded_notes = self.note_embedding(note_inputs)
+        embedded_notes = self.note_embedding(note_inputs.unsqueeze(-1).to(torch.float))
         embedded_rhythm = self.rhythm_embedding(duration_inputs.unsqueeze(-1))
         encoded_lyrics = self.lyric_encoder.infer(embedded_lyrics)
         encoded_notes = self.lyric_encoder.infer(embedded_notes)
         encoded_rhythm = self.lyric_encoder.infer(embedded_rhythm)
+        embedded_tempo = self.tempo_embedding(tempo.unsqueeze(-1).to(torch.float))
 
-        outputs, stops, alignments = self.decoder.infer([encoded_lyrics, encoded_notes, encoded_rhythm])
+        outputs, stops, alignments = self.decoder.infer(
+            [encoded_lyrics, encoded_notes, encoded_rhythm], condition=embedded_tempo)
+        outputs_postnet = self.postnet(outputs)
+        outputs_postnet = outputs + outputs_postnet
+
+        return outputs, outputs_postnet, stops, alignments
+
+
+class TacotronV2(nn.Module):
+    def __init__(self,
+                 num_embeddings,
+                 encoder_lyric_dim=256,
+                 encoder_pitch_dim=256,
+                 encoder_rhythm_dim=256,
+                 embedding_dim=256,
+                 encoder_n_convolutions=3,
+                 encoder_kernel_size=5,
+                 encoder_p_dropout=0.5,
+                 hidden_dim=256,
+                 attention_dim=128,
+                 attention_rnn_dim=1024,
+                 attention_location_n_filters=32,
+                 attention_location_kernel_size=31,
+                 decoder_rnn_dim=1024,
+                 p_prenet_dropout=0.1,
+                 p_attention_dropout=0.1,
+                 p_decoder_dropout=0.1,
+                 prenet_dim=128,
+                 max_decoder_steps=1000,
+                 stopping_threshold=0.5,
+                 postnet_n_convolutions=5,
+                 postnet_embedding_dim=512,
+                 postnet_kernel_size=5,
+                 postnet_p_dropout=0.5):
+        super(TacotronV2, self).__init__()
+        self.lyrics_embedding = nn.Embedding(num_embeddings, encoder_lyric_dim)
+        self.pitch_embedding = nn.Linear(1, encoder_pitch_dim)
+        self.rhythm_embedding = nn.Linear(1, encoder_rhythm_dim)
+        self.tempo_embedding = nn.Linear(1, embedding_dim)
+        self.encoder = EncoderV2(input_dim=encoder_lyric_dim + encoder_pitch_dim + encoder_rhythm_dim,
+                                 output_dim=embedding_dim,
+                                 p_dropout=encoder_p_dropout,
+                                 n_convolutions=encoder_n_convolutions,
+                                 kernel_size=encoder_kernel_size)
+        self.decoder = Decoder(num_encoders=1,
+                               hidden_dim=hidden_dim,
+                               embedding_dim=embedding_dim,
+                               attention_dim=attention_dim,
+                               attention_rnn_dim=attention_rnn_dim,
+                               attention_location_n_filters=attention_location_n_filters,
+                               attention_location_kernel_size=attention_location_kernel_size,
+                               decoder_rnn_dim=decoder_rnn_dim,
+                               p_prenet_dropout=p_prenet_dropout,
+                               p_attention_dropout=p_attention_dropout,
+                               p_decoder_dropout=p_decoder_dropout,
+                               prenet_dim=prenet_dim,
+                               max_decoder_steps=max_decoder_steps,
+                               stopping_threshold=stopping_threshold,
+                               conditional_dim=embedding_dim)
+        self.postnet = Postnet(hidden_dim=hidden_dim,
+                               n_convolutions=postnet_n_convolutions,
+                               embedding_dim=postnet_embedding_dim,
+                               kernel_size=postnet_kernel_size,
+                               p_dropout=postnet_p_dropout)
+
+    def forward(self, lyric_inputs, note_inputs, duration_inputs, tempo, input_lengths, mels):
+        lyrics_embedded = self.lyrics_embedding(lyric_inputs)
+        pitches_embedded = self.pitch_embedding(note_inputs.to(torch.float).unsqueeze(-1))
+        rhythm_embedded = self.rhythm_embedding(duration_inputs.to(torch.float).unsqueeze(-1))
+        tempo_embedded = self.tempo_embedding(tempo.to(torch.float).unsqueeze(-1))
+        encoder_in = torch.cat([lyrics_embedded, pitches_embedded, rhythm_embedded], dim=-1)
+        encoder_out = self.encoder(encoder_in, input_lengths)
+
+        outputs, stops, alignments = self.decoder([encoder_out], mels, [input_lengths], condition=tempo_embedded)
+        outputs_postnet = self.postnet(outputs)
+        outputs_postnet = outputs + outputs_postnet
+
+        return outputs, outputs_postnet, stops, alignments
+
+    def infer(self, lyric_inputs, note_inputs, duration_inputs, tempo):
+        lyrics_embedded = self.lyrics_embedding(lyric_inputs)
+        pitches_embedded = self.pitch_embedding(note_inputs.to(torch.float).unsqueeze(-1))
+        rhythm_embedded = self.rhythm_embedding(duration_inputs.to(torch.float).unsqueeze(-1))
+        tempo_embedded = self.tempo_embedding(tempo.to(torch.float).unsqueeze(-1))
+        encoder_in = torch.cat([lyrics_embedded, pitches_embedded, rhythm_embedded], dim=-1)
+        encoder_out = self.encoder.infer(encoder_in)
+
+        outputs, stops, alignments = self.decoder.infer([encoder_out], condition=tempo_embedded)
         outputs_postnet = self.postnet(outputs)
         outputs_postnet = outputs + outputs_postnet
 
