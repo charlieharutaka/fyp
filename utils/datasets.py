@@ -89,7 +89,7 @@ class SegmentedAudioDataset(Dataset):
 
 
 class ChoralSingingDataset(Dataset):
-    def __init__(self, root, receptive_field, segment_size=None, segment_hop=None, n_mels=64, n_fft=400, spectrogram_transform=None):
+    def __init__(self, root, receptive_field, segment_size=None, segment_hop=None, n_mels=64, n_fft=400, f_min=80.0, f_max=8000.0, spectrogram_transform=None):
         """
         Downloads the choral singing dataset, performs mel-spectrogram analysis on the data.
         Returns samples of segments of the dataset with the corresponding mel-spectrogram and part information.
@@ -136,7 +136,7 @@ class ChoralSingingDataset(Dataset):
         self.resample = torchaudio.transforms.Resample(self.original_sample_rate, self.target_sample_rate)
         self.n_mels = n_mels
         self.n_fft = n_fft
-        self.melspec = torchaudio.transforms.MelSpectrogram(n_mels=n_mels, n_fft=n_fft, pad_mode="constant")
+        self.melspec = torchaudio.transforms.MelSpectrogram(n_mels=n_mels, n_fft=n_fft, f_min=80.0, f_max=8000.0, pad_mode="constant")
         self.win_length = n_fft
         self.hop_length = self.win_length // 2
         self.segment_size = segment_size if segment_size is not None else n_fft
@@ -248,7 +248,7 @@ class VocalData:
 
 
 class VocalSetDataset(Dataset):
-    def __init__(self, root='data', n_fft=400, n_mels=64, spectrogram_transform=None, rebuild_cache=False, note_transform=None, exclude=[]):
+    def __init__(self, root='data', n_fft=400, n_mels=64, f_min=80.0, f_max=8000.0, spectrogram_transform=None, rebuild_cache=False, note_transform=None, exclude=[]):
         self.root = root
         self.subfolder = 'VocalSet'
         self.scores_subfolder = 'VocalSetScores'
@@ -259,7 +259,7 @@ class VocalSetDataset(Dataset):
         self.cache_dir = f"{self.dataset_directory}/cache"
         # Transforms
         self.resample = torchaudio.transforms.Resample(44100, 16000)
-        self.melspec = torchaudio.transforms.MelSpectrogram(16000, n_fft=n_fft, n_mels=n_mels)
+        self.melspec = torchaudio.transforms.MelSpectrogram(16000, n_fft=n_fft, n_mels=n_mels, f_min=f_min, f_max=f_max, pad_mode='constant')
         self.spectrogram_transform = spectrogram_transform
         self.note_transform = note_transform
         # Some arpabet things

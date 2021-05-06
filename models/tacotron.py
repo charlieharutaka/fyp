@@ -197,8 +197,8 @@ class EncoderV2(nn.Module):
 
     def forward(self, x, input_lengths):
         input_lengths = input_lengths.cpu().to(torch.int64)
-        # x of shape (batch, features, sequence)
-        x = self.conv_banks(x)
+        # x of shape (batch, sequence, features)
+        x = self.conv_banks(x.transpose(1, 2))
         x = x.transpose(1, 2)
         # x of shape (batch, sequence, features)
         x = nn.utils.rnn.pack_padded_sequence(
@@ -209,8 +209,8 @@ class EncoderV2(nn.Module):
         return x
 
     def infer(self, x):
-        # x of shape (1, features, sequence)
-        x = self.conv_banks(x)
+        # x of shape (1, sequence, features)
+        x = self.conv_banks(x.transpose(1, 2))
         x = x.transpose(1, 2)
         # x of shape (batch, sequence, features)
         self.lstm.flatten_parameters()
@@ -395,7 +395,7 @@ class DecoderCell(nn.Module):
                  hidden_dim=256):
         super(DecoderCell, self).__init__()
         # Keep params
-        self.num_encoders = num_encoders # number of encoded streams
+        self.num_encoders = num_encoders  # number of encoded streams
         self.hidden_dim = hidden_dim  # n_mel_channels
         self.embedding_dim = embedding_dim  # encoder_embedding_dim
         self.attention_dim = attention_dim
@@ -468,8 +468,9 @@ class DecoderCell(nn.Module):
     def forward(self, last_frame):
         # Do attention for each of the encoder streans
         for i in range(self.num_encoders):
-        # Concatenate the previous decoder frame with the current attention context in the channel dimension
-            attention_in = torch.cat([last_frame, self.attention_context[i]], dim=-1)
+            # Concatenate the previous decoder frame with the current attention context in the channel dimension
+            attention_in = torch.cat(
+                [last_frame, self.attention_context[i]], dim=-1)
             attention_hidden, attention_cell = self.attention_rnns[i](
                 attention_in, (self.attention_hidden[i], self.attention_cell[i]))
             self.attention_cell[i] = attention_cell
@@ -484,7 +485,8 @@ class DecoderCell(nn.Module):
             self.attention_context[i] = attention_context
             self.attention_weights[i] = attention_weights
             # Update the cumulative attention weights
-            self.attention_weights_cum[i] = self.attention_weights_cum[i] + self.attention_weights[i]
+            self.attention_weights_cum[i] = self.attention_weights_cum[i] + \
+                self.attention_weights[i]
         # Combine the hidden and context states by addition
         attention_hidden = 0
         for h in self.attention_hidden:
@@ -596,7 +598,6 @@ class Decoder(nn.Module):
         # Shape of alignments is (time_out, batch)
         alignments = torch.stack(alignments).permute(
             2, 1, 0, 3).contiguous()  # to (num_encoders, batch, time_out, time_in)
-        print(alignments.shape)
 
         return outputs, stops, alignments
 
@@ -623,16 +624,15 @@ class Decoder(nn.Module):
             decoder_input = output
         if i == self.max_decoder_steps - 1:
             warnings.warn("Max decoder steps reached", UserWarning)
-
         # Shape of outputs is (time_out, batch, hidden_dim)
         outputs = torch.stack(outputs).transpose(
             0, 1).contiguous()  # to (batch, time, hidden_dim)
         # Shape of stops is (time_out, batch)
         stops = torch.stack(stops).permute(
             1, 0).contiguous()  # to (batch, time)
-        # Shape of alignments is (time_out, batch, time_in)
+        # Shape of alignments is (time_out, batch)
         alignments = torch.stack(alignments).permute(
-            1, 0, 2).contiguous()  # to (batch, time_out, time_in)
+            2, 1, 0, 3).contiguous()  # to (num_encoders, batch, time_out, time_in)
 
         return outputs, stops, alignments
 
@@ -640,7 +640,6 @@ class Decoder(nn.Module):
 class Tacotron(nn.Module):
     def __init__(self,
                  num_embeddings,
-                 num_encoders=1,
                  encoder_lyric_dim=256,
                  encoder_pitch_dim=256,
                  encoder_rhythm_dim=256,
@@ -665,25 +664,35 @@ class Tacotron(nn.Module):
                  postnet_kernel_size=5,
                  postnet_p_dropout=0.5):
         super(Tacotron, self).__init__()
-        # self.embedding = nn.Embedding(
-        #     num_embeddings, embedding_dim=embedding_dim)
-        # self.note_embedding = nn.Embedding(
-        #     num_embeddings=num_note_embeddings, embedding_dim=embedding_dim)
-        # self.note_embedding = nn.Linear(1, embedding_dim)
-        # self.encoder = EncoderV2(input_dim=2 * embedding_dim,
-        #                          output_dim=embedding_dim,
-        #                          p_dropout=encoder_p_dropout,
-        #                          n_convolutions=encoder_n_convolutions,
-        #                          kernel_size=encoder_kernel_size)
-        self.encoder = TemporalEncoder(num_embeddings,
-                                       lyric_dim=encoder_lyric_dim,
-                                       pitch_dim=encoder_pitch_dim,
-                                       rhythm_dim=encoder_rhythm_dim,
+        self.lyric_embedding = nn.Embedding(
+            num_embeddings, embedding_dim=encoder_lyric_dim)
+        self.note_embedding = nn.Embedding(
+            128, embedding_dim=encoder_pitch_dim)
+        self.rhythm_embedding = nn.Linear(1, encoder_rhythm_dim)
+        self.lyric_encoder = EncoderV2(input_dim=encoder_lyric_dim,
                                        output_dim=embedding_dim,
                                        p_dropout=encoder_p_dropout,
                                        n_convolutions=encoder_n_convolutions,
                                        kernel_size=encoder_kernel_size)
-        self.decoder = Decoder(num_encoders=num_encoders,
+        self.note_encoder = EncoderV2(input_dim=encoder_pitch_dim,
+                                      output_dim=embedding_dim,
+                                      p_dropout=encoder_p_dropout,
+                                      n_convolutions=encoder_n_convolutions,
+                                      kernel_size=encoder_kernel_size)
+        self.rhythm_encoder = EncoderV2(input_dim=encoder_rhythm_dim,
+                                        output_dim=embedding_dim,
+                                        p_dropout=encoder_p_dropout,
+                                        n_convolutions=encoder_n_convolutions,
+                                        kernel_size=encoder_kernel_size)
+        # self.encoder = TemporalEncoder(num_embeddings,
+        #                                lyric_dim=encoder_lyric_dim,
+        #                                pitch_dim=encoder_pitch_dim,
+        #                                rhythm_dim=encoder_rhythm_dim,
+        #                                output_dim=embedding_dim,
+        #                                p_dropout=encoder_p_dropout,
+        #                                n_convolutions=encoder_n_convolutions,
+        #                                kernel_size=encoder_kernel_size)
+        self.decoder = Decoder(num_encoders=3,
                                hidden_dim=hidden_dim,
                                embedding_dim=embedding_dim,
                                attention_dim=attention_dim,
@@ -719,10 +728,18 @@ class Tacotron(nn.Module):
         # encoder_inputs = torch.cat(
         #     [embedded_notes, embedded_inputs], dim=-1).transpose(1, 2)
         # encoder_outputs = self.encoder(encoder_inputs, input_lengths)
-        encoder_outputs = self.encoder(
-            lyric_inputs, note_inputs, duration_inputs, input_lengths)
+        # encoder_outputs = self.encoder(
+        #     lyric_inputs, note_inputs, duration_inputs, input_lengths)
+
+        embedded_lyrics = self.lyric_embedding(lyric_inputs)
+        embedded_notes = self.note_embedding(note_inputs)
+        embedded_rhythm = self.rhythm_embedding(duration_inputs.unsqueeze(-1))
+        encoded_lyrics = self.lyric_encoder(embedded_lyrics, input_lengths)
+        encoded_notes = self.lyric_encoder(embedded_notes, input_lengths)
+        encoded_rhythm = self.lyric_encoder(embedded_rhythm, input_lengths)
+
         outputs, stops, alignments = self.decoder(
-            [encoder_outputs], mels, [input_lengths])
+            [encoded_lyrics, encoded_notes, encoded_rhythm], mels, [input_lengths, input_lengths, input_lengths])
         outputs_postnet = self.postnet(outputs)
         outputs_postnet = outputs + outputs_postnet
 
@@ -742,9 +759,15 @@ class Tacotron(nn.Module):
         # encoder_inputs = torch.cat(
         #     [embedded_notes, embedded_inputs], dim=-1).transpose(1, 2)
         # encoder_outputs = self.encoder.infer(encoder_inputs)
-        encoder_outputs = self.encoder.infer(
-            lyric_inputs, note_inputs, duration_inputs)
-        outputs, stops, alignments = self.decoder.infer([encoder_outputs])
+
+        embedded_lyrics = self.lyric_embedding(lyric_inputs)
+        embedded_notes = self.note_embedding(note_inputs)
+        embedded_rhythm = self.rhythm_embedding(duration_inputs.unsqueeze(-1))
+        encoded_lyrics = self.lyric_encoder.infer(embedded_lyrics)
+        encoded_notes = self.lyric_encoder.infer(embedded_notes)
+        encoded_rhythm = self.lyric_encoder.infer(embedded_rhythm)
+
+        outputs, stops, alignments = self.decoder.infer([encoded_lyrics, encoded_notes, encoded_rhythm])
         outputs_postnet = self.postnet(outputs)
         outputs_postnet = outputs + outputs_postnet
 
