@@ -1,6 +1,7 @@
 from datetime import datetime
 from pprint import pprint
 from itertools import combinations
+import os
 
 import torch
 import torch.nn as nn
@@ -11,7 +12,7 @@ import torchaudio
 
 import matplotlib.pyplot as plt
 
-from models.tacotron import TacotronV2
+from models.tacotron import Tacotron, SequentialAttentionDecoderCell
 from utils.datasets import VocalSetDataset, vocal_data_collate_fn
 from utils.arpabet import ARPABET, ArpabetEncoding, START, END
 from utils.musicxml import Note
@@ -28,7 +29,7 @@ else:
 
 print("==========")
 
-BATCH_SIZE=8
+BATCH_SIZE=4
 
 print(f"Batch size: {BATCH_SIZE}")
 
@@ -91,10 +92,11 @@ tacotron_hp = {
     "postnet_n_convolutions": 5,
     "postnet_embedding_dim": 512,
     "postnet_kernel_size": 5,
-    "postnet_p_dropout": 0.1
+    "postnet_p_dropout": 0.1,
+    "decoder_cell": SequentialAttentionDecoderCell
 }
 
-model = TacotronV2(num_embeddings=len(encoding), **tacotron_hp)
+model = Tacotron(num_embeddings=len(encoding), **tacotron_hp)
 model.to(device)
 params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print("Total number of parameters is: {}".format(params))
@@ -162,8 +164,9 @@ PRINT_EVERY = 10
 EPOCH_LEN = len(loader_train)
 
 run_name = datetime.now().strftime("%b%d_%H-%M-%S_kaguya")
+os.mkdir(run_name)
 writer = SummaryWriter(f'runs/tacotron/{run_name}')
-writer.add_text("Notes", "n_fft=800, n_mels=128, f_min=80.0, f_max=8000.0, clipped on both ends, with 1 attention layer, 1 encoders & no sync")
+writer.add_text("Notes", "n_fft=800, n_mels=128, f_min=80.0, f_max=8000.0, clipped on both ends, with 1 attention layer and 3 encoders")
 model.train()
 
 all_mel_losses = []
@@ -257,7 +260,7 @@ for epoch in range(1, NUM_EPOCHS + 1):
         im = ax.imshow(alignments[0][0].detach().cpu().transpose(0, 1), aspect='auto', origin='lower', interpolation='nearest')
         fig.colorbar(im)
         writer.add_figure("Forced Alignment", fig, epoch - 1)
-        fig.savefig(f'{run_name}.forced.alignment.{epoch}.png')
+        fig.savefig(f'{run_name}/forced.alignment.{epoch}.png')
         # fig, ax = plt.subplots(figsize=(10,5))
         # im = ax.imshow(alignments[1][0].detach().cpu().transpose(0, 1), aspect='auto', origin='lower', interpolation='nearest')
         # fig.colorbar(im)
@@ -271,13 +274,13 @@ for epoch in range(1, NUM_EPOCHS + 1):
         im = ax.imshow(output_postnet[0].detach().cpu().transpose(0, 1), aspect='auto', origin='lower', interpolation='nearest', cmap='magma')
         fig.colorbar(im)
         writer.add_figure("Forced Spectrogram", fig, epoch - 1)
-        fig.savefig(f'{run_name}.forced.spectrogram.{epoch}.png')
+        fig.savefig(f'{run_name}/forced.spectrogram.{epoch}.png')
         # Gate value illustration
         fig, ax = plt.subplots(figsize=(10,1))
         im = ax.imshow(torch.sigmoid(gate_preds[0].detach()).cpu().unsqueeze(0), aspect='auto', origin='lower', interpolation='nearest', cmap='RdYlGn')
         fig.colorbar(im)
         writer.add_figure("Forced Gate", fig, epoch - 1)
-        fig.savefig(f'{run_name}.forced.gate.{epoch}.png')
+        fig.savefig(f'{run_name}/forced.gate.{epoch}.png')
 
         # Inference illustrations
         output, output_postnet, gate_preds, alignments = model.infer(fixed_lyrics, fixed_pitches, fixed_rhythm, fixed_tempo)
@@ -287,7 +290,7 @@ for epoch in range(1, NUM_EPOCHS + 1):
         im = ax.imshow(alignments[0][0].detach().cpu().transpose(0, 1), aspect='auto', origin='lower', interpolation='nearest')
         fig.colorbar(im)
         writer.add_figure("Inferred Alignment", fig, epoch - 1)
-        fig.savefig(f'{run_name}.infer.alignment.{epoch}.png')
+        fig.savefig(f'{run_name}/infer.alignment.{epoch}.png')
         # fig, ax = plt.subplots(figsize=(10,5))
         # im = ax.imshow(alignments[1][0].detach().cpu().transpose(0, 1), aspect='auto', origin='lower', interpolation='nearest')
         # fig.colorbar(im)
@@ -301,26 +304,26 @@ for epoch in range(1, NUM_EPOCHS + 1):
         im = ax.imshow(output_postnet[0].detach().cpu().transpose(0, 1), aspect='auto', origin='lower', interpolation='nearest', cmap='magma')
         fig.colorbar(im)
         writer.add_figure("Inferred Spectrogram", fig, epoch - 1)
-        fig.savefig(f'{run_name}.infer.spectrogram.{epoch}.png')
+        fig.savefig(f'{run_name}/infer.spectrogram.{epoch}.png')
         # Gate value illustration
         fig, ax = plt.subplots(figsize=(10,1))
         im = ax.imshow(torch.sigmoid(gate_preds[0].detach()).cpu().unsqueeze(0), aspect='auto', origin='lower', interpolation='nearest', cmap='RdYlGn')
         fig.colorbar(im)
         writer.add_figure("Inferred Gate", fig, epoch - 1)
-        fig.savefig(f'{run_name}.infer.gate.{epoch}.png')
+        fig.savefig(f'{run_name}/infer.gate.{epoch}.png')
 
-    torch.save(model.state_dict(), f"tacotron.{run_name}.{epoch}.pt")
+    torch.save(model.state_dict(), f"{run_name}/tacotron.{epoch}.pt")
 
-    torch.save(all_mel_losses, f"{run_name}.all_mel_losses.pt")
-    torch.save(all_post_mel_losses, f"{run_name}.all_post_mel_losses.pt")
-    torch.save(all_gate_losses, f"{run_name}.all_gate_losses.pt")
-    torch.save(all_synchro_losses, f"{run_name}.all_synchro_losses.pt")
-    torch.save(all_losses, f"{run_name}.all_losses.pt")
+    torch.save(all_mel_losses, f"{run_name}/all_mel_losses.pt")
+    torch.save(all_post_mel_losses, f"{run_name}/all_post_mel_losses.pt")
+    torch.save(all_gate_losses, f"{run_name}/all_gate_losses.pt")
+    torch.save(all_synchro_losses, f"{run_name}/all_synchro_losses.pt")
+    torch.save(all_losses, f"{run_name}/all_losses.pt")
     
-    torch.save(validation_mel_losses, f"{run_name}.validation_mel_losses.pt")
-    torch.save(validation_post_mel_losses, f"{run_name}.validation_post_mel_losses.pt")
-    torch.save(validation_gate_losses, f"{run_name}.validation_gate_losses.pt")
-    torch.save(validation_synchro_losses, f"{run_name}.validation_synchro_losses.pt")
-    torch.save(validation_losses, f"{run_name}.validation_losses.pt")
+    torch.save(validation_mel_losses, f"{run_name}/validation_mel_losses.pt")
+    torch.save(validation_post_mel_losses, f"{run_name}/validation_post_mel_losses.pt")
+    torch.save(validation_gate_losses, f"{run_name}/validation_gate_losses.pt")
+    torch.save(validation_synchro_losses, f"{run_name}/validation_synchro_losses.pt")
+    torch.save(validation_losses, f"{run_name}/validation_losses.pt")
 
 writer.close()

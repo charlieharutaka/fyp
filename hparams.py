@@ -1,3 +1,5 @@
+from models.tacotron import DecoderCell
+
 TACOTRON_HP = {
     "encoder_lyric_dim": 256,
     "encoder_pitch_dim": 256,
@@ -21,7 +23,8 @@ TACOTRON_HP = {
     "postnet_n_convolutions": 5,
     "postnet_embedding_dim": 512,
     "postnet_kernel_size": 5,
-    "postnet_p_dropout": 0.5
+    "postnet_p_dropout": 0.5,
+    "decoder_cell": DecoderCell
 }
 
 WAVENET_HP = {
