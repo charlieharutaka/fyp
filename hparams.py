@@ -1,3 +1,4 @@
+import torch.nn as nn
 from models.tacotron import DecoderCell
 
 TACOTRON_HP = {
@@ -40,4 +41,40 @@ WAVENET_HP = {
     "classes": 256,
     "kernel_size": 2,
     "bias": False
+}
+
+
+SODIUM_HP = {
+    "embedding_lyric_dim": 256,
+    "embedding_pitch_dim": 256,
+    "embedding_dim": 256,
+    "encoder_prenet_num_convolutions": 3,
+    "encoder_prenet_kernel_size": 5,
+    "encoder_prenet_activation": nn.Identity(),
+    "encoder_p_dropout": 0.1,
+    "encoder_use_transformer": True,
+    "encoder_transformer_nlayers": 8,
+    "encoder_transformer_nhead": 4,
+    "encoder_transformer_ff_dim": 1024,
+    "encoder_transformer_activation": "relu",
+    "duration_hidden_dim": 256,
+    "duration_n_layers": 1,
+    "duration_bias": False,
+    "range_hidden_dim": 256,
+    "range_n_layers": 1,
+    "range_bias": True,
+    "pos_embedding_dim": 32,
+    "pos_embedding_denom": 10000.0,
+    "pos_embedding_max_len": 1000,
+    "decoder_prenet_n_layers": 2,
+    "decoder_prenet_dim": 256,
+    "decoder_prenet_activation": nn.ReLU(),
+    "decoder_prenet_p_dropout": 0.5,
+    "decoder_dim": 1024,
+    "decoder_n_layers": 1,
+    "output_dim": 128,
+    "postnet_num_convolutions": 5,
+    "postnet_hidden_features": 512,
+    "postnet_kernel_size": 5,
+    "postnet_activation": nn.Tanh()
 }

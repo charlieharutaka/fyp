@@ -248,7 +248,7 @@ class VocalData:
 
 
 class VocalSetDataset(Dataset):
-    def __init__(self, root='data', n_fft=400, n_mels=64, f_min=80.0, f_max=8000.0, spectrogram_transform=None, rebuild_cache=False, note_transform=None, exclude=[]):
+    def __init__(self, root='data', n_fft=400, n_mels=64, f_min=80.0, f_max=8000.0, spectrogram_transform=None, rebuild_cache=False, note_transform=None, exclude=[], use_vad=True):
         self.root = root
         self.subfolder = 'VocalSet'
         self.scores_subfolder = 'VocalSetScores'
@@ -259,6 +259,7 @@ class VocalSetDataset(Dataset):
         self.cache_dir = f"{self.dataset_directory}/cache"
         # Transforms
         self.resample = torchaudio.transforms.Resample(44100, 16000)
+        self.use_vad = use_vad
         self.vad = torchaudio.transforms.Vad(16000, trigger_level=1.0)
         self.melspec = torchaudio.transforms.MelSpectrogram(16000, n_fft=n_fft, n_mels=n_mels, f_min=f_min, f_max=f_max, pad_mode='constant')
         self.spectrogram_transform = spectrogram_transform
@@ -316,8 +317,9 @@ class VocalSetDataset(Dataset):
                 assert sr == 44100, f"Unexpected sample rate {sr}"
                 wave = wave[0]
                 wave = self.resample(wave)
-                wave = self.vad(wave).flip(dims=(-1,))
-                wave = self.vad(wave).flip(dims=(-1,))
+                if self.use_vad:
+                    wave = self.vad(wave).flip(dims=(-1,))
+                    wave = self.vad(wave).flip(dims=(-1,))
                 melspec = self.melspec(wave).transpose(0, 1)
 
                 split_path = []

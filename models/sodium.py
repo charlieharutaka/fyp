@@ -611,39 +611,32 @@ class SodiumDecoder(nn.Module):
                 (batch, self.decoder_dim), requires_grad=True) for _ in range(
                 self.decoder_n_layers)]
 
-    def forward(self, encoder_out: torch.FloatTensor, mels: torch.FloatTensor,
-                mel_lengths: torch.LongTensor) -> torch.FloatTensor:
+    def forward(self, encoder_out: torch.FloatTensor, mels: torch.FloatTensor) -> torch.FloatTensor:
         """
         Teacher-forced training.
         Args:
             encoder_out: (sequence, batch, embedding_dim)
             mels: (sequence, batch, output_dim)
-            mel_lengths: (batch)
         Returns:
             output: (sequence, batch, output_dim)
         """
         go_frame = self.init_go_frame(encoder_out)
         decoder_inputs = torch.cat([go_frame.unsqueeze(0), mels], dim=0)
         decoder_inputs = self.pre_net(decoder_inputs)
-        decoder_inputs = nn.utils.rnn.pack_padded_sequence(decoder_inputs, mel_lengths + 1)
 
         self.init_rnn_states(encoder_out)
-        cumulative_batch = 0
         outputs = []
-        for frame, batch_size in enumerate(decoder_inputs.batch_sizes):
-            if frame == encoder_out.shape[0]:
-                break
-            output = decoder_inputs.data.narrow(0, cumulative_batch, batch_size)
-            output = torch.cat((output, encoder_out[frame, :batch_size, :]), dim=-1)
+        for frame in range(encoder_out.shape[0]):
+            output = torch.cat((decoder_inputs[frame], encoder_out[frame]), dim=-1)
             # output has size (batch, prenet_dim + embedding_dim)
             for layer in range(self.decoder_n_layers):
                 self.hidden_states[layer], self.cell_states[layer] =\
                     self.decoder[layer](output, (self.hidden_states[layer], self.cell_states[layer]))
                 output = self.hidden_states[layer]
             outputs.append(output)
-            cumulative_batch = cumulative_batch + batch_size
-        output = nn.utils.rnn.pad_sequence(outputs).transpose(0, 1)
-        output = torch.cat((output, encoder_out), dim=2)
+
+        outputs = torch.stack(outputs, dim=0)
+        output = torch.cat((outputs, encoder_out), dim=-1)
         output = self.projection(output)
 
         return output
@@ -659,14 +652,14 @@ class SodiumDecoder(nn.Module):
         output = self.init_go_frame(encoder_out)
         self.init_rnn_states(encoder_out)
         outputs = []
-        for idx, frame in enumerate(encoder_out):
+        for frame in range(encoder_out.shape[0]):
             output = self.pre_net(output)
-            output = torch.cat([output, frame], dim=-1)
+            output = torch.cat([output, encoder_out[frame]], dim=-1)
             for layer in range(self.decoder_n_layers):
                 self.hidden_states[layer], self.cell_states[layer] =\
                     self.decoder[layer](output, (self.hidden_states[layer], self.cell_states[layer]))
                 output = self.hidden_states[layer]
-            output = torch.cat([output, frame], dim=-1)
+            output = torch.cat([output, encoder_out[frame]], dim=-1)
             output = self.projection(output)
             outputs.append(output)
         if len(outputs) > 0:
@@ -801,11 +794,11 @@ class Sodium(nn.Module):
             kernel_size=postnet_kernel_size,
             activation=postnet_activation)
 
-    def forward(self, lyrics, pitches, durations, tempo, target_durations, input_lengths, mels, mel_lengths):
+    def forward(self, lyrics, pitches, durations, tempo, target_durations, input_lengths, mels):
         encoder_out = self.encoder(lyrics, pitches, input_lengths)
         pred_durations, upsampled, _, weights = self.upsampler(
             encoder_out, durations, tempo, target_durations, input_lengths)
-        output = self.decoder(upsampled, mels, mel_lengths)
+        output = self.decoder(upsampled, mels)
 
         postnet_output = output.permute(1, 2, 0)
         postnet_output = self.post_net(postnet_output)
