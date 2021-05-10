@@ -271,7 +271,7 @@ class TemporalEncoder(nn.Module):
         return output
 
 
-def get_mask_from_lengths(lengths):
+def get_mask_from_lengths(lengths: torch.LongTensor) -> torch.BoolTensor:
     # Given a length tensor, create masks
     max_len = torch.max(lengths).item()
     ids = torch.arange(0, max_len, out=lengths.new_empty(
