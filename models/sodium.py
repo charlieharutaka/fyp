@@ -173,7 +173,7 @@ class GaussianUpsampling(nn.Module):
         normal = normal.expand((batch, sequence_in, sequence_out))
 
         # Enumerate the output indices: (sequence_out,)
-        ts = torch.arange(0, sequence_out)
+        ts = torch.arange(0, sequence_out).to(inputs)
 
         # compute the log-probabilities over all i, t
         probs = normal.log_prob(ts)  # (batch, sequence_in, sequence_out)
@@ -181,9 +181,10 @@ class GaussianUpsampling(nn.Module):
         # Sum the probabilities along the input dimension
         cum_probs = probs.logsumexp(dim=1).unsqueeze(1)
         weights = probs - cum_probs  # (batch, sequence_in, sequence_out)
+        weights = weights.exp()
 
         # Upscale the input using the weights matrix
-        upscaled = torch.bmm(weights.exp().transpose(1, 2), inputs)
+        upscaled = torch.bmm(weights.transpose(1, 2), inputs)
 
         # Back to sequence-first
         upscaled = upscaled.transpose(0, 1)
@@ -252,10 +253,8 @@ class SodiumEncoder(nn.Module):
             transformer_nhead: int = 4,
             transformer_ff_dim: int = 1024,
             transformer_activation: str = "relu",
-            sample_rate: int = 16000):
+            lstm_num_layers: int = 1):
         super(SodiumEncoder, self).__init__()
-        self.sample_rate = sample_rate
-
         self.embedding_lyrics = nn.Embedding(num_lyrics, embedding_lyric_dim)
         self.embedding_pitches = nn.Embedding(num_pitches, embedding_pitch_dim)
 
@@ -274,7 +273,12 @@ class SodiumEncoder(nn.Module):
             self.pos_enc = TransformerPositionalEncoding(embedding_dim)
             self.encoder = nn.TransformerEncoder(transformer_layer, transformer_nlayers)
         else:
-            self.encoder = nn.LSTM(input_size=embedding_dim, hidden_size=(embedding_dim // 2), bidirectional=True)
+            self.encoder = nn.LSTM(
+                input_size=embedding_dim,
+                hidden_size=(
+                    embedding_dim // 2),
+                bidirectional=True,
+                num_layers=lstm_num_layers)
 
     def forward(
             self,
@@ -301,6 +305,7 @@ class SodiumEncoder(nn.Module):
             # we use the positional encoding
             encoder_in = self.pos_enc(prenet_output)
             input_mask = ~get_mask_from_lengths(input_lengths)
+            input_mask = input_mask.to(encoder_in.device)
             output = self.encoder(encoder_in, src_key_padding_mask=input_mask)
         else:
             output = nn.utils.rnn.pack_padded_sequence(prenet_output, input_lengths)
@@ -732,6 +737,7 @@ class Sodium(nn.Module):
             encoder_transformer_nhead: int = 4,
             encoder_transformer_ff_dim: int = 1024,
             encoder_transformer_activation: str = "relu",
+            encoder_lstm_num_layers: int = 1,
             duration_hidden_dim: int = 256,
             duration_n_layers: int = 1,
             duration_bias: bool = False,
@@ -766,7 +772,8 @@ class Sodium(nn.Module):
             transformer_nlayers=encoder_transformer_nlayers,
             transformer_nhead=encoder_transformer_nhead,
             transformer_ff_dim=encoder_transformer_ff_dim,
-            transformer_activation=encoder_transformer_activation)
+            transformer_activation=encoder_transformer_activation,
+            lstm_num_layers=encoder_lstm_num_layers)
         self.upsampler = SodiumUpsampler(
             embedding_dim=embedding_dim,
             duration_hidden_dim=duration_hidden_dim,
@@ -819,6 +826,5 @@ class Sodium(nn.Module):
             postnet_output = output + postnet_output
         else:
             postnet_output = torch.zeros(output.shape)
-
 
         return output, postnet_output, weights
