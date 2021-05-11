@@ -8,6 +8,7 @@ import torch.nn.functional as F
 import torch.distributions as D
 
 from .tacotron import get_mask_from_lengths
+from .layers import ZoneOutLSTM
 
 """
 Non-attentive Tacotron aka Sodium (because Na get it ha ha)
@@ -253,7 +254,8 @@ class SodiumEncoder(nn.Module):
             transformer_nhead: int = 4,
             transformer_ff_dim: int = 1024,
             transformer_activation: str = "relu",
-            lstm_num_layers: int = 1):
+            lstm_num_layers: int = 1,
+            lstm_zoneout: float = 0.1):
         super(SodiumEncoder, self).__init__()
         self.embedding_lyrics = nn.Embedding(num_lyrics, embedding_lyric_dim)
         self.embedding_pitches = nn.Embedding(num_pitches, embedding_pitch_dim)
@@ -273,12 +275,13 @@ class SodiumEncoder(nn.Module):
             self.pos_enc = TransformerPositionalEncoding(embedding_dim)
             self.encoder = nn.TransformerEncoder(transformer_layer, transformer_nlayers)
         else:
-            self.encoder = nn.LSTM(
+            self.encoder = ZoneOutLSTM(
                 input_size=embedding_dim,
                 hidden_size=(
                     embedding_dim // 2),
                 bidirectional=True,
-                num_layers=lstm_num_layers)
+                num_layers=lstm_num_layers,
+                zoneout=lstm_zoneout)
 
     def forward(
             self,
@@ -738,6 +741,7 @@ class Sodium(nn.Module):
             encoder_transformer_ff_dim: int = 1024,
             encoder_transformer_activation: str = "relu",
             encoder_lstm_num_layers: int = 1,
+            encoder_lstm_zoneout: float = 0.1,
             duration_hidden_dim: int = 256,
             duration_n_layers: int = 1,
             duration_bias: bool = False,
@@ -773,7 +777,8 @@ class Sodium(nn.Module):
             transformer_nhead=encoder_transformer_nhead,
             transformer_ff_dim=encoder_transformer_ff_dim,
             transformer_activation=encoder_transformer_activation,
-            lstm_num_layers=encoder_lstm_num_layers)
+            lstm_num_layers=encoder_lstm_num_layers,
+            lstm_zoneout=encoder_lstm_zoneout)
         self.upsampler = SodiumUpsampler(
             embedding_dim=embedding_dim,
             duration_hidden_dim=duration_hidden_dim,
