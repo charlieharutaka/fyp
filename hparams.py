@@ -103,6 +103,7 @@ SODIUM_LARGE_HP = {
     "range_hidden_dim": 512,
     "range_n_layers": 2,
     "range_bias": True,
+    "range_clip": 2.0,
     "pos_embedding_dim": 32,
     "pos_embedding_denom": 10000.0,
     "pos_embedding_max_len": 1000,

@@ -9,6 +9,7 @@ import torch.distributions as D
 
 from .tacotron import get_mask_from_lengths
 from .layers import ZoneOutLSTM
+from .utils import softclamp
 
 """
 Non-attentive Tacotron aka Sodium (because Na get it ha ha)
@@ -414,8 +415,20 @@ class SodiumDurationPredictor(nn.Module):
 
 
 class SodiumRangePredictor(nn.Module):
-    def __init__(self, embedding_dim: int = 256, hidden_dim: int = 256, n_layers: int = 1, bias: bool = True):
+    """
+    Module that predicts the range parameter (stdev) for the Gaussian upsampling.
+    If clip is a float greater than 0, the output ranges are clipped between 0 and
+    clip times the duration value of that range.
+    """
+    def __init__(
+            self,
+            embedding_dim: int = 256,
+            hidden_dim: int = 256,
+            n_layers: int = 1,
+            bias: bool = True,
+            clip: float = 0.0):
         super(SodiumRangePredictor, self).__init__()
+        self.clip = clip
         self.lstm = nn.LSTM(
             input_size=embedding_dim + 1,
             hidden_size=(
@@ -445,7 +458,11 @@ class SodiumRangePredictor(nn.Module):
         lstm_out, _ = self.lstm(lstm_in)
         lstm_out, _ = nn.utils.rnn.pad_packed_sequence(lstm_out)
 
-        pred_ranges = F.softplus(self.projection(lstm_out))
+        pred_ranges = self.projection(lstm_out)
+        if self.clip > 0.0:
+            pred_ranges = softclamp(pred_ranges, self.clip * durations_output)
+        else:
+            pred_ranges = F.softplus(pred_ranges)
         return pred_ranges
 
     def infer(self, encoder_output: torch.FloatTensor, durations_output: torch.LongTensor) -> torch.FloatTensor:
@@ -479,6 +496,7 @@ class SodiumUpsampler(nn.Module):
             range_hidden_dim: int = 256,
             range_n_layers: int = 1,
             range_bias: bool = True,
+            range_clip: float = 0.0,
             pos_embedding_dim: int = 32,
             pos_embedding_denom: float = 10000.0,
             pos_embedding_max_len: int = 1000):
@@ -492,7 +510,8 @@ class SodiumUpsampler(nn.Module):
             embedding_dim=embedding_dim,
             hidden_dim=range_hidden_dim,
             n_layers=range_n_layers,
-            bias=range_bias)
+            bias=range_bias,
+            clip=range_clip)
         self.pos_embedding = PositionalEmbedding(
             dim=pos_embedding_dim,
             denom=pos_embedding_denom,
@@ -748,6 +767,7 @@ class Sodium(nn.Module):
             range_hidden_dim: int = 256,
             range_n_layers: int = 1,
             range_bias: bool = True,
+            range_clip: float = 0.0,
             pos_embedding_dim: int = 32,
             pos_embedding_denom: float = 10000.0,
             pos_embedding_max_len: int = 1000,
@@ -787,6 +807,7 @@ class Sodium(nn.Module):
             range_hidden_dim=range_hidden_dim,
             range_n_layers=range_n_layers,
             range_bias=range_bias,
+            range_clip=range_clip,
             pos_embedding_dim=pos_embedding_dim,
             pos_embedding_denom=pos_embedding_denom,
             pos_embedding_max_len=pos_embedding_max_len)

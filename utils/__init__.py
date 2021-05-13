@@ -1,12 +1,13 @@
 import torch
 
+
 def round_preserve_sum(t: torch.Tensor) -> torch.LongTensor:
     """
     Rounds tensor while preserving their rounded sum.
     Algorithm:
         1. Floor the tensor t
         2. Order indices by their remainder values
-        3. Increment the values with k largest remainders, 
+        3. Increment the values with k largest remainders,
             where k is the amount that we need to increase the sum to reach our target value
     Do not expect this to maintain gradients
     """

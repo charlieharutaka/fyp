@@ -192,4 +192,3 @@ class ZoneOutLSTM(nn.Module):
             outputs = outputs.transpose(0, 1)
 
         return outputs, self.hidden_states[-1]
-
