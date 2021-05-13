@@ -459,10 +459,13 @@ class SodiumRangePredictor(nn.Module):
         lstm_out, _ = nn.utils.rnn.pad_packed_sequence(lstm_out)
 
         pred_ranges = self.projection(lstm_out)
+        # if self.clip > 0.0:
+        #     pred_ranges = softclamp(pred_ranges, self.clip * durations_output)
+        #     print(pred_ranges)
+        # else:
         if self.clip > 0.0:
-            pred_ranges = softclamp(pred_ranges, self.clip * durations_output)
-        else:
-            pred_ranges = F.softplus(pred_ranges)
+            pred_ranges = torch.minimum(pred_ranges, self.clip * durations_output)
+        pred_ranges = F.softplus(pred_ranges)
         return pred_ranges
 
     def infer(self, encoder_output: torch.FloatTensor, durations_output: torch.LongTensor) -> torch.FloatTensor:
