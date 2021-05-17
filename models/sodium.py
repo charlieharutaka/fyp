@@ -198,7 +198,7 @@ class GaussianUpsampling(nn.Module):
 """ ----- Encoder Modules ----- """
 
 
-class SodiumEncoderPrenet(nn.Module):
+class SodiumEncoderConvnet(nn.Module):
     def __init__(
             self,
             num_convolutions: int = 3,
@@ -209,7 +209,7 @@ class SodiumEncoderPrenet(nn.Module):
         """
         Simple pre-net that applies sequential convolutions with batch norm
         """
-        super(SodiumEncoderPrenet, self).__init__()
+        super(SodiumEncoderConvnet, self).__init__()
         padding = (kernel_size - 1) // 2
         self.num_convolutions = num_convolutions
         self.convolutions = nn.ModuleList()
@@ -239,6 +239,12 @@ class SodiumEncoderPrenet(nn.Module):
 
 
 class SodiumEncoder(nn.Module):
+    """
+    Using the idea that lyrics are sequence-dependent, but pitches are not:
+    1. Pass lyrics through embedding + prenet
+    3. LSTM/Transformer
+    4. Concat with pitch projection and pass through postnet
+    """
     def __init__(
             self,
             num_lyrics: int,
@@ -249,6 +255,9 @@ class SodiumEncoder(nn.Module):
             prenet_num_convolutions: int = 3,
             prenet_kernel_size: int = 5,
             prenet_activation: nn.Module = nn.Identity(),
+            postnet_num_convolutions: int = 3,
+            postnet_kernel_size: int = 5,
+            postnet_activation: nn.Module = nn.Tanh(),
             p_dropout: float = 0.1,
             use_transformer: bool = True,
             transformer_nlayers: int = 8,
@@ -259,31 +268,36 @@ class SodiumEncoder(nn.Module):
             lstm_zoneout: float = 0.1):
         super(SodiumEncoder, self).__init__()
         self.embedding_lyrics = nn.Embedding(num_lyrics, embedding_lyric_dim)
-        # self.embedding_pitches = nn.Embedding(num_pitches, embedding_pitch_dim)
         self.embedding_pitches = nn.Linear(1, embedding_pitch_dim)
 
-        prenet_input_dim = embedding_pitch_dim  # embedding_lyric_dim + embedding_pitch_dim
-        self.prenet = SodiumEncoderPrenet(
+        self.prenet = SodiumEncoderConvnet(
             num_convolutions=prenet_num_convolutions,
-            input_features=prenet_input_dim,
-            output_features=embedding_dim,
+            input_features=embedding_lyric_dim,
+            output_features=embedding_lyric_dim,
             kernel_size=prenet_kernel_size,
             activation=prenet_activation)
 
         self.use_transformer = use_transformer
         if use_transformer:
             transformer_layer = nn.TransformerEncoderLayer(
-                embedding_dim, transformer_nhead, transformer_ff_dim, p_dropout, transformer_activation)
-            self.pos_enc = TransformerPositionalEncoding(embedding_dim)
+                embedding_lyric_dim, transformer_nhead, transformer_ff_dim, p_dropout, transformer_activation)
+            self.pos_enc = TransformerPositionalEncoding(embedding_lyric_dim)
             self.encoder = nn.TransformerEncoder(transformer_layer, transformer_nlayers)
         else:
             self.encoder = ZoneOutLSTM(
-                input_size=embedding_dim,
+                input_size=embedding_lyric_dim,
                 hidden_size=(
-                    embedding_dim // 2),
+                    embedding_lyric_dim // 2),
                 bidirectional=True,
                 num_layers=lstm_num_layers,
                 zoneout=lstm_zoneout)
+
+        self.postnet = SodiumEncoderConvnet(
+            num_convolutions=postnet_num_convolutions,
+            input_features=embedding_lyric_dim + embedding_pitch_dim,
+            output_features=embedding_dim,
+            kernel_size=postnet_kernel_size,
+            activation=postnet_activation)
 
     def forward(
             self,
@@ -298,27 +312,27 @@ class SodiumEncoder(nn.Module):
         Returns:
             output (sequence, batch, embedding_dim)
         """
-        # lyrics = self.embedding_lyrics(lyrics)
-        # pitches = self.embedding_pitches(pitches)
-        prenet_input = self.embedding_pitches(pitches.to(torch.float).unsqueeze(-1))
-        # concat and pass through prenet
-        # prenet_input = torch.cat([lyrics, pitches], dim=-1)
-        prenet_input = prenet_input.permute(1, 2, 0)
-        prenet_output = self.prenet(prenet_input)
-        prenet_output = prenet_output.permute(2, 0, 1)
-        output = prenet_output
+        lyrics = self.embedding_lyrics(lyrics)
+        # pass through prenet
+        lyrics = lyrics.permute(1, 2, 0)
+        lyrics = self.prenet(lyrics)
+        lyrics = lyrics.permute(2, 0, 1)
 
-        # if self.use_transformer:
-        #     # we use the positional encoding
-        #     encoder_in = self.pos_enc(prenet_output)
-        #     input_mask = ~get_mask_from_lengths(input_lengths)
-        #     input_mask = input_mask.to(encoder_in.device)
-        #     output = self.encoder(encoder_in, src_key_padding_mask=input_mask)
-        # else:
-        #     output = nn.utils.rnn.pack_padded_sequence(prenet_output, input_lengths)
-        #     self.encoder.flatten_parameters()
-        #     output, _ = self.encoder(output)
-        #     output, _ = nn.utils.rnn.pad_packed_sequence(output)
+        if self.use_transformer:
+            # we use the positional encoding
+            lyrics = self.pos_enc(lyrics)
+            input_mask = ~get_mask_from_lengths(input_lengths)
+            input_mask = input_mask.to(lyrics.device)
+            lyrics = self.encoder(lyrics, src_key_padding_mask=input_mask)
+        else:
+            lyrics, _ = self.encoder(lyrics)
+
+        pitches = self.embedding_pitches(pitches.to(torch.float).unsqueeze(-1))
+        output = torch.cat([lyrics, pitches], dim=-1)
+        # pass through postnet
+        output = output.permute(1, 2, 0)
+        output = self.postnet(output)
+        output = output.permute(2, 0, 1)
 
         return output
 
@@ -333,22 +347,25 @@ class SodiumEncoder(nn.Module):
         Returns:
             output (sequence, batch, embedding_dim)
         """
-        # lyrics = self.embedding_lyrics(lyrics)
-        # pitches = self.embedding_pitches(pitches)
-        prenet_input = self.embedding_pitches(pitches.to(torch.float).unsqueeze(-1))
-        # concat and pass through prenet
-        # prenet_input = torch.cat([lyrics, pitches], dim=-1)
-        prenet_input = prenet_input.permute(1, 2, 0)
-        prenet_output = self.prenet(prenet_input)
-        prenet_output = prenet_output.permute(2, 0, 1)
-        output = prenet_output
+        lyrics = self.embedding_lyrics(lyrics)
+        # pass through prenet
+        lyrics = lyrics.permute(1, 2, 0)
+        lyrics = self.prenet(lyrics)
+        lyrics = lyrics.permute(2, 0, 1)
 
-        # if self.use_transformer:
-        #     # we use the positional encoding
-        #     encoder_in = self.pos_enc(prenet_output)
-        #     output = self.encoder(encoder_in)
-        # else:
-        #     output, _ = self.encoder(prenet_output)
+        if self.use_transformer:
+            # we use the positional encoding
+            lyrics = self.pos_enc(lyrics)
+            lyrics = self.encoder(lyrics)
+        else:
+            lyrics, _ = self.encoder(lyrics)
+
+        pitches = self.embedding_pitches(pitches.to(torch.float).unsqueeze(-1))
+        output = torch.cat([lyrics, pitches], dim=-1)
+        # pass through postnet
+        output = output.permute(1, 2, 0)
+        output = self.postnet(output)
+        output = output.permute(2, 0, 1)
 
         return output
 
@@ -705,15 +722,9 @@ class SodiumDecoder(nn.Module):
             for layer in range(self.decoder_n_layers):
                 old_hidden_state = self.hidden_states[layer]
                 old_cell_state = self.cell_states[layer]
-                new_hidden_state, new_cell_state =\
+                self.hidden_states[layer], self.cell_states[layer] =\
                     self.decoder[layer](output, (old_hidden_state, old_cell_state))
-                
-                # ZoneOut
-                zoneout_h = self.zoneout.sample(new_hidden_state.shape).to(new_hidden_state)
-                zoneout_c = self.zoneout.sample(new_cell_state.shape).to(new_cell_state)
-                self.hidden_states[layer] =  (new_hidden_state * (1 - zoneout_h)) + (old_hidden_state * zoneout_h)
-                self.cell_states[layer] =  (new_cell_state * (1 - zoneout_c)) + (old_cell_state * zoneout_c)
-
+                # No zoneout in inference
                 output = self.hidden_states[layer]
             output = torch.cat([output, encoder_out[frame]], dim=-1)
             output = self.projection(output)
@@ -782,6 +793,9 @@ class Sodium(nn.Module):
             encoder_prenet_num_convolutions: int = 3,
             encoder_prenet_kernel_size: int = 5,
             encoder_prenet_activation: nn.Module = nn.Identity(),
+            encoder_postnet_num_convolutions: int = 3,
+            encoder_postnet_kernel_size: int = 5,
+            encoder_postnet_activation: nn.Module = nn.Tanh(),
             encoder_p_dropout: float = 0.1,
             encoder_use_transformer: bool = True,
             encoder_transformer_nlayers: int = 8,
@@ -821,6 +835,9 @@ class Sodium(nn.Module):
             prenet_num_convolutions=encoder_prenet_num_convolutions,
             prenet_kernel_size=encoder_prenet_kernel_size,
             prenet_activation=encoder_prenet_activation,
+            postnet_num_convolutions=encoder_postnet_num_convolutions,
+            postnet_kernel_size=encoder_postnet_kernel_size,
+            postnet_activation=encoder_postnet_activation,
             p_dropout=encoder_p_dropout,
             use_transformer=encoder_use_transformer,
             transformer_nlayers=encoder_transformer_nlayers,

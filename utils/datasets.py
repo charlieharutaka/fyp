@@ -367,8 +367,6 @@ class VocalSetDataset(Dataset):
 
                 if transpose_steps is None:
                     transpose_steps = [0]
-                else:
-                    transpose_steps = tqdm(transpose_steps, leave=False)
                 for pitch_shift in transpose_steps:
                     if pitch_shift != 0:
                         transposed_wave = wave.numpy()

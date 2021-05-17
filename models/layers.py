@@ -93,6 +93,7 @@ class ZoneOutLSTM(nn.Module):
         self.dropout = D.Bernoulli(1.0 - dropout)
         self.zoneout = D.Bernoulli(1.0 - zoneout)
         # Projection
+        # just kidding i don't know how proj works
         # self.use_projection = proj_size > 0
         # if self.use_projection:
         #     self.projection = nn.Linear(hidden_size, proj_size)
@@ -153,7 +154,7 @@ class ZoneOutLSTM(nn.Module):
                 new_hidden, new_cell = self.cells[layer](output, (hidden, cell))
                 # Apply dropout on output
                 output = new_hidden
-                if self.p_dropout > 0 and layer < self.num_layers - 1:
+                if self.training and self.p_dropout > 0 and layer < self.num_layers - 1:
                     dropout = self.dropout.sample(new_hidden.shape).to(new_hidden)
                     output = output * dropout
                 # Append states
@@ -168,7 +169,7 @@ class ZoneOutLSTM(nn.Module):
                     cell = old_cell_states.narrow(0, self.num_layers + layer, 1).squeeze(0)
                     new_hidden, new_cell = self.cells[layer](output, (hidden, cell))
                     # Apply dropout on output
-                    if self.p_dropout > 0 and layer < self.num_layers - 1:
+                    if self.training and self.p_dropout > 0 and layer < self.num_layers - 1:
                         dropout = self.dropout.sample(new_hidden.shape).to(new_hidden)
                         output = new_hidden * dropout
                     # Append states
@@ -178,7 +179,7 @@ class ZoneOutLSTM(nn.Module):
             new_hidden_states = torch.stack(new_hidden_states, dim=0)
             new_cell_states = torch.stack(new_cell_states, dim=0)
             # Apply zoneout
-            if self.p_zoneout > 0:
+            if self.training and self.p_zoneout > 0:
                 zoneout_h = self.zoneout.sample(new_hidden_states.shape).to(new_hidden_states)
                 zoneout_c = self.zoneout.sample(new_cell_states.shape).to(new_cell_states)
                 new_hidden_states = new_hidden_states * zoneout_h + (old_hidden_states * (1 - zoneout_h))
