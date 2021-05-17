@@ -5,6 +5,7 @@ import shutil
 from zipfile import ZipFile
 from collections import Counter, namedtuple
 import glob
+import dataclasses
 from dataclasses import dataclass
 from typing import List
 
@@ -14,6 +15,7 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset
 import torchaudio
 from tqdm import tqdm
+import librosa
 
 from .musicxml import parse_musicxml, Note
 
@@ -234,6 +236,19 @@ class ChoralSingingDataset(Dataset):
         return (input, target, specs,  data[3], data[4], data[5])
 
 
+def transpose(notes: List[Note], step: int) -> List[Note]:
+    """
+    Returns a copy of notes with all the ptiches transposed by step
+    """
+    new_notes = []
+    for note in notes:
+        new_pitch = note.pitch + step
+        new_note = dataclasses.replace(note, pitch=new_pitch)
+        new_notes.append(new_note)
+    return new_notes
+
+
+
 @dataclass
 class VocalData:
     singer: str
@@ -248,7 +263,7 @@ class VocalData:
 
 
 class VocalSetDataset(Dataset):
-    def __init__(self, root='data', n_fft=400, n_mels=64, f_min=80.0, f_max=8000.0, spectrogram_transform=None, rebuild_cache=False, note_transform=None, exclude=[], use_vad=True):
+    def __init__(self, root='data', n_fft=400, n_mels=64, f_min=80.0, f_max=8000.0, spectrogram_transform=None, rebuild_cache=False, note_transform=None, exclude=[], use_vad=True, transpose_steps=None):
         self.root = root
         self.subfolder = 'VocalSet'
         self.scores_subfolder = 'VocalSetScores'
@@ -316,11 +331,6 @@ class VocalSetDataset(Dataset):
                 wave, sr = torchaudio.load(data_path)
                 assert sr == 44100, f"Unexpected sample rate {sr}"
                 wave = wave[0]
-                wave = self.resample(wave)
-                if self.use_vad:
-                    wave = self.vad(wave).flip(dims=(-1,))
-                    wave = self.vad(wave).flip(dims=(-1,))
-                melspec = self.melspec(wave).transpose(0, 1)
 
                 split_path = []
                 while data_path != "":
@@ -354,16 +364,39 @@ class VocalSetDataset(Dataset):
                     score = parse_musicxml(score_path, constant_phoneme=self.vowel2arpabet[vowel])
                 tempo = score["P1"]["tempo"]
                 notes = score["P1"]["notes"]
-                assert notes is not None, f"None notes at {filename}"
-                data = VocalData(singer, vocalise, technique, vowel, excerpt, tempo, notes, wave, melspec)
-                orig_cache_filename = f"{self.cache_dir}/{singer}_{vocalise}_{technique}_{vowel or excerpt}"
-                cache_filename = orig_cache_filename + ".pt"
-                ctr = 1
-                while path.exists(cache_filename):
-                    cache_filename = orig_cache_filename + f"_{ctr}.pt"
-                    ctr += 1
-                torch.save(data, cache_filename)
-                self.data_paths.append(cache_filename)
+
+                if transpose_steps is None:
+                    transpose_steps = [0]
+                else:
+                    transpose_steps = tqdm(transpose_steps, leave=False)
+                for pitch_shift in transpose_steps:
+                    if pitch_shift != 0:
+                        transposed_wave = wave.numpy()
+                        transposed_wave = librosa.effects.pitch_shift(transposed_wave, 44100, n_steps=pitch_shift)
+                        transposed_wave = torch.from_numpy(transposed_wave)
+                    else:
+                        transposed_wave = wave
+                    transposed_wave = self.resample(transposed_wave)
+                    if self.use_vad:
+                        transposed_wave = self.vad(transposed_wave).flip(dims=(-1,))
+                        transposed_wave = self.vad(transposed_wave).flip(dims=(-1,))
+                    melspec = self.melspec(transposed_wave).transpose(0, 1)
+
+                    if pitch_shift != 0:
+                        transposed_notes = transpose(notes, pitch_shift)
+                    else:
+                        transposed_notes = notes
+                    
+                    data = VocalData(singer, vocalise, technique, vowel, excerpt, tempo, transposed_notes, transposed_wave, melspec)
+                    pitch_shift_text = ('+' if pitch_shift > 0 else '') + str(pitch_shift)
+                    orig_cache_filename = f"{self.cache_dir}/{singer}_{vocalise}_{technique}_{vowel or excerpt}_{pitch_shift_text}"
+                    cache_filename = orig_cache_filename + ".pt"
+                    ctr = 1
+                    while path.exists(cache_filename):
+                        cache_filename = orig_cache_filename + f"_{ctr}.pt"
+                        ctr += 1
+                    torch.save(data, cache_filename)
+                    self.data_paths.append(cache_filename)
             print(f"Saved {len(self.data_paths)} samples to cache")
         else:
             self.data_paths = glob.glob(f"{self.cache_dir}/*.pt")
