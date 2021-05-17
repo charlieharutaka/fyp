@@ -259,9 +259,10 @@ class SodiumEncoder(nn.Module):
             lstm_zoneout: float = 0.1):
         super(SodiumEncoder, self).__init__()
         self.embedding_lyrics = nn.Embedding(num_lyrics, embedding_lyric_dim)
-        self.embedding_pitches = nn.Embedding(num_pitches, embedding_pitch_dim)
+        # self.embedding_pitches = nn.Embedding(num_pitches, embedding_pitch_dim)
+        self.embedding_pitches = nn.Linear(1, embedding_pitch_dim)
 
-        prenet_input_dim = embedding_lyric_dim + embedding_pitch_dim
+        prenet_input_dim = embedding_pitch_dim  # embedding_lyric_dim + embedding_pitch_dim
         self.prenet = SodiumEncoderPrenet(
             num_convolutions=prenet_num_convolutions,
             input_features=prenet_input_dim,
@@ -297,25 +298,27 @@ class SodiumEncoder(nn.Module):
         Returns:
             output (sequence, batch, embedding_dim)
         """
-        lyrics = self.embedding_lyrics(lyrics)
-        pitches = self.embedding_pitches(pitches)
+        # lyrics = self.embedding_lyrics(lyrics)
+        # pitches = self.embedding_pitches(pitches)
+        prenet_input = self.embedding_pitches(pitches.to(torch.float).unsqueeze(-1))
         # concat and pass through prenet
-        prenet_input = torch.cat([lyrics, pitches], dim=-1)
+        # prenet_input = torch.cat([lyrics, pitches], dim=-1)
         prenet_input = prenet_input.permute(1, 2, 0)
         prenet_output = self.prenet(prenet_input)
         prenet_output = prenet_output.permute(2, 0, 1)
+        output = prenet_output
 
-        if self.use_transformer:
-            # we use the positional encoding
-            encoder_in = self.pos_enc(prenet_output)
-            input_mask = ~get_mask_from_lengths(input_lengths)
-            input_mask = input_mask.to(encoder_in.device)
-            output = self.encoder(encoder_in, src_key_padding_mask=input_mask)
-        else:
-            output = nn.utils.rnn.pack_padded_sequence(prenet_output, input_lengths)
-            self.encoder.flatten_parameters()
-            output, _ = self.encoder(output)
-            output, _ = nn.utils.rnn.pad_packed_sequence(output)
+        # if self.use_transformer:
+        #     # we use the positional encoding
+        #     encoder_in = self.pos_enc(prenet_output)
+        #     input_mask = ~get_mask_from_lengths(input_lengths)
+        #     input_mask = input_mask.to(encoder_in.device)
+        #     output = self.encoder(encoder_in, src_key_padding_mask=input_mask)
+        # else:
+        #     output = nn.utils.rnn.pack_padded_sequence(prenet_output, input_lengths)
+        #     self.encoder.flatten_parameters()
+        #     output, _ = self.encoder(output)
+        #     output, _ = nn.utils.rnn.pad_packed_sequence(output)
 
         return output
 
@@ -330,20 +333,22 @@ class SodiumEncoder(nn.Module):
         Returns:
             output (sequence, batch, embedding_dim)
         """
-        lyrics = self.embedding_lyrics(lyrics)
-        pitches = self.embedding_pitches(pitches)
+        # lyrics = self.embedding_lyrics(lyrics)
+        # pitches = self.embedding_pitches(pitches)
+        prenet_input = self.embedding_pitches(pitches.to(torch.float).unsqueeze(-1))
         # concat and pass through prenet
-        prenet_input = torch.cat([lyrics, pitches], dim=-1)
+        # prenet_input = torch.cat([lyrics, pitches], dim=-1)
         prenet_input = prenet_input.permute(1, 2, 0)
         prenet_output = self.prenet(prenet_input)
         prenet_output = prenet_output.permute(2, 0, 1)
+        output = prenet_output
 
-        if self.use_transformer:
-            # we use the positional encoding
-            encoder_in = self.pos_enc(prenet_output)
-            output = self.encoder(encoder_in)
-        else:
-            output, _ = self.encoder(prenet_output)
+        # if self.use_transformer:
+        #     # we use the positional encoding
+        #     encoder_in = self.pos_enc(prenet_output)
+        #     output = self.encoder(encoder_in)
+        # else:
+        #     output, _ = self.encoder(prenet_output)
 
         return output
 
@@ -420,6 +425,7 @@ class SodiumRangePredictor(nn.Module):
     If clip is a float greater than 0, the output ranges are clipped between 0 and
     clip times the duration value of that range.
     """
+
     def __init__(
             self,
             embedding_dim: int = 256,
@@ -592,11 +598,13 @@ class SodiumDecoder(nn.Module):
             prenet_p_dropout: float = 0.5,
             decoder_dim: int = 1024,
             decoder_n_layers: int = 1,
-            output_dim: int = 128):
+            output_dim: int = 128,
+            zoneout: float = 0.0):
         super(SodiumDecoder, self).__init__()
         self.decoder_dim = decoder_dim
         self.decoder_n_layers = decoder_n_layers
         self.output_dim = output_dim
+        self.zoneout = D.Bernoulli(zoneout)
         # Pre-Net Projection
         pre_net = []
         for i in range(prenet_n_layers):
@@ -660,8 +668,17 @@ class SodiumDecoder(nn.Module):
             output = torch.cat((decoder_inputs[frame], encoder_out[frame]), dim=-1)
             # output has size (batch, prenet_dim + embedding_dim)
             for layer in range(self.decoder_n_layers):
-                self.hidden_states[layer], self.cell_states[layer] =\
-                    self.decoder[layer](output, (self.hidden_states[layer], self.cell_states[layer]))
+                old_hidden_state = self.hidden_states[layer]
+                old_cell_state = self.cell_states[layer]
+                new_hidden_state, new_cell_state =\
+                    self.decoder[layer](output, (old_hidden_state, old_cell_state))
+                
+                # ZoneOut
+                zoneout_h = self.zoneout.sample(new_hidden_state.shape).to(new_hidden_state)
+                zoneout_c = self.zoneout.sample(new_cell_state.shape).to(new_cell_state)
+                self.hidden_states[layer] =  (new_hidden_state * (1 - zoneout_h)) + (old_hidden_state * zoneout_h)
+                self.cell_states[layer] =  (new_cell_state * (1 - zoneout_c)) + (old_cell_state * zoneout_c)
+
                 output = self.hidden_states[layer]
             outputs.append(output)
 
@@ -686,8 +703,17 @@ class SodiumDecoder(nn.Module):
             output = self.pre_net(output)
             output = torch.cat([output, encoder_out[frame]], dim=-1)
             for layer in range(self.decoder_n_layers):
-                self.hidden_states[layer], self.cell_states[layer] =\
-                    self.decoder[layer](output, (self.hidden_states[layer], self.cell_states[layer]))
+                old_hidden_state = self.hidden_states[layer]
+                old_cell_state = self.cell_states[layer]
+                new_hidden_state, new_cell_state =\
+                    self.decoder[layer](output, (old_hidden_state, old_cell_state))
+                
+                # ZoneOut
+                zoneout_h = self.zoneout.sample(new_hidden_state.shape).to(new_hidden_state)
+                zoneout_c = self.zoneout.sample(new_cell_state.shape).to(new_cell_state)
+                self.hidden_states[layer] =  (new_hidden_state * (1 - zoneout_h)) + (old_hidden_state * zoneout_h)
+                self.cell_states[layer] =  (new_cell_state * (1 - zoneout_c)) + (old_cell_state * zoneout_c)
+
                 output = self.hidden_states[layer]
             output = torch.cat([output, encoder_out[frame]], dim=-1)
             output = self.projection(output)
@@ -781,6 +807,7 @@ class Sodium(nn.Module):
             decoder_dim: int = 1024,
             decoder_n_layers: int = 1,
             output_dim: int = 128,
+            decoder_zoneout: float = 0.0,
             postnet_num_convolutions: int = 5,
             postnet_hidden_features: int = 512,
             postnet_kernel_size: int = 5,
@@ -822,7 +849,8 @@ class Sodium(nn.Module):
             prenet_p_dropout=decoder_prenet_p_dropout,
             decoder_dim=decoder_dim,
             decoder_n_layers=decoder_n_layers,
-            output_dim=output_dim)
+            output_dim=output_dim,
+            zoneout=decoder_zoneout)
         self.post_net = SodiumPostnet(
             num_convolutions=postnet_num_convolutions,
             features=output_dim,

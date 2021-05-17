@@ -144,14 +144,14 @@ def get_loss(output, output_postnet, pred_durations, mels, target_durations, lam
 
 print("==========")
 
-NUM_EPOCHS = 20
+NUM_EPOCHS = 100
 PRINT_EVERY = 10
 EPOCH_LEN = len(loader_train)
 
 run_name = datetime.now().strftime("%b%d_%H-%M-%S_kaguya")
 os.mkdir(run_name)
 writer = SummaryWriter(f'runs/sodium/{run_name}')
-writer.add_text("Notes", "n_fft=800, n_mels=128, f_min=80.0, f_max=8000.0, clipped on both ends, range clipping 0.1")
+writer.add_text("Notes", "n_fft=800, n_mels=128, f_min=80.0, f_max=8000.0, clipped on both ends, range clipping 0.1, pitch only no encoder, decoder zoneout")
 model.train()
 
 all_mel_losses = []
