@@ -249,9 +249,13 @@ class SodiumEncoder(nn.Module):
             self,
             num_lyrics: int,
             num_pitches: int,
+            num_singers: int,
+            num_techniques: int,
             embedding_lyric_dim: int = 256,
             embedding_pitch_dim: int = 256,
-            embedding_dim: int = 256,
+            embedding_singer_dim: int = 16,
+            embedding_technique_dim: int = 16,
+            embedding_dim: int = 512,
             prenet_num_convolutions: int = 3,
             prenet_kernel_size: int = 5,
             prenet_activation: nn.Module = nn.Identity(),
@@ -269,6 +273,8 @@ class SodiumEncoder(nn.Module):
         super(SodiumEncoder, self).__init__()
         self.embedding_lyrics = nn.Embedding(num_lyrics, embedding_lyric_dim)
         self.embedding_pitches = nn.Linear(1, embedding_pitch_dim)
+        self.embedding_singers = nn.Embedding(num_singers, embedding_singer_dim)
+        self.embedding_techniques = nn.Embedding(num_techniques, embedding_technique_dim)
 
         self.prenet = SodiumEncoderConvnet(
             num_convolutions=prenet_num_convolutions,
@@ -294,7 +300,7 @@ class SodiumEncoder(nn.Module):
 
         self.postnet = SodiumEncoderConvnet(
             num_convolutions=postnet_num_convolutions,
-            input_features=embedding_lyric_dim + embedding_pitch_dim,
+            input_features=embedding_lyric_dim + embedding_pitch_dim + embedding_singer_dim + embedding_technique_dim,
             output_features=embedding_dim,
             kernel_size=postnet_kernel_size,
             activation=postnet_activation)
@@ -303,11 +309,15 @@ class SodiumEncoder(nn.Module):
             self,
             lyrics: torch.LongTensor,
             pitches: torch.LongTensor,
+            singers: torch.LongTensor,
+            techniques: torch.LongTensor,
             input_lengths: torch.LongTensor) -> torch.FloatTensor:
         """
         Args:
             lyrics: (sequence, batch)
             pitches: (sequence, batch)
+            singers: (batch)
+            techniques: (batch)
             input_lengths: (batch)
         Returns:
             output (sequence, batch, embedding_dim)
@@ -328,7 +338,9 @@ class SodiumEncoder(nn.Module):
             lyrics, _ = self.encoder(lyrics)
 
         pitches = self.embedding_pitches(pitches.to(torch.float).unsqueeze(-1))
-        output = torch.cat([lyrics, pitches], dim=-1)
+        singer_embedding = self.embedding_singers(singers).unsqueeze(0).expand(lyrics.shape[0], -1, -1)
+        technique_embedding = self.embedding_techniques(techniques).unsqueeze(0).expand(lyrics.shape[0], -1, -1)
+        output = torch.cat([lyrics, pitches, singer_embedding, technique_embedding], dim=-1)
         # pass through postnet
         output = output.permute(1, 2, 0)
         output = self.postnet(output)
@@ -339,11 +351,15 @@ class SodiumEncoder(nn.Module):
     def infer(
             self,
             lyrics: torch.LongTensor,
-            pitches: torch.LongTensor) -> torch.FloatTensor:
+            pitches: torch.LongTensor,
+            singers: torch.LongTensor,
+            techniques: torch.LongTensor) -> torch.FloatTensor:
         """
         Args:
             lyrics: (sequence, batch)
             pitches: (sequence, batch)
+            singers: (batch)
+            techniques: (batch)
         Returns:
             output (sequence, batch, embedding_dim)
         """
@@ -361,7 +377,9 @@ class SodiumEncoder(nn.Module):
             lyrics, _ = self.encoder(lyrics)
 
         pitches = self.embedding_pitches(pitches.to(torch.float).unsqueeze(-1))
-        output = torch.cat([lyrics, pitches], dim=-1)
+        singer_embedding = self.embedding_singers(singers).unsqueeze(0).expand(lyrics.shape[0], -1, -1)
+        technique_embedding = self.embedding_techniques(techniques).unsqueeze(0).expand(lyrics.shape[0], -1, -1)
+        output = torch.cat([lyrics, pitches, singer_embedding, technique_embedding], dim=-1)
         # pass through postnet
         output = output.permute(1, 2, 0)
         output = self.postnet(output)
@@ -371,7 +389,7 @@ class SodiumEncoder(nn.Module):
 
 
 class SodiumDurationPredictor(nn.Module):
-    def __init__(self, embedding_dim: int = 256, hidden_dim: int = 256, n_layers: int = 1, bias: bool = False):
+    def __init__(self, embedding_dim: int = 512, hidden_dim: int = 256, n_layers: int = 1, bias: bool = False):
         super(SodiumDurationPredictor, self).__init__()
         self.lstm = nn.LSTM(
             input_size=embedding_dim + 1,
@@ -445,7 +463,7 @@ class SodiumRangePredictor(nn.Module):
 
     def __init__(
             self,
-            embedding_dim: int = 256,
+            embedding_dim: int = 512,
             hidden_dim: int = 256,
             n_layers: int = 1,
             bias: bool = True,
@@ -515,7 +533,7 @@ class SodiumUpsampler(nn.Module):
 
     def __init__(
             self,
-            embedding_dim: int = 256,
+            embedding_dim: int = 512,
             duration_hidden_dim: int = 256,
             duration_n_layers: int = 1,
             duration_bias: bool = False,
@@ -608,7 +626,7 @@ class SodiumUpsampler(nn.Module):
 class SodiumDecoder(nn.Module):
     def __init__(
             self,
-            embedding_dim: int = 256,
+            embedding_dim: int = 512,
             prenet_n_layers: int = 2,
             prenet_dim: int = 256,
             prenet_activation: nn.Module = nn.ReLU(),
@@ -787,9 +805,13 @@ class Sodium(nn.Module):
             self,
             num_lyrics: int,
             num_pitches: int,
+            num_singers: int,
+            num_techniques: int,
             embedding_lyric_dim: int = 256,
             embedding_pitch_dim: int = 256,
-            embedding_dim: int = 256,
+            embedding_singer_dim: int = 16,
+            embedding_technique_dim: int = 16,
+            embedding_dim: int = 512,
             encoder_prenet_num_convolutions: int = 3,
             encoder_prenet_kernel_size: int = 5,
             encoder_prenet_activation: nn.Module = nn.Identity(),
@@ -828,9 +850,11 @@ class Sodium(nn.Module):
             postnet_activation: nn.Module = nn.Tanh()):
         super(Sodium, self).__init__()
         self.encoder = SodiumEncoder(
-            num_lyrics, num_pitches,
+            num_lyrics, num_pitches, num_singers, num_techniques,
             embedding_lyric_dim=embedding_lyric_dim,
             embedding_pitch_dim=embedding_pitch_dim,
+            embedding_singer_dim=embedding_singer_dim,
+            embedding_technique_dim=embedding_technique_dim,
             embedding_dim=embedding_dim,
             prenet_num_convolutions=encoder_prenet_num_convolutions,
             prenet_kernel_size=encoder_prenet_kernel_size,
@@ -875,8 +899,8 @@ class Sodium(nn.Module):
             kernel_size=postnet_kernel_size,
             activation=postnet_activation)
 
-    def forward(self, lyrics, pitches, durations, tempo, target_durations, input_lengths, mels):
-        encoder_out = self.encoder(lyrics, pitches, input_lengths)
+    def forward(self, singers, techniques, lyrics, pitches, durations, tempo, target_durations, input_lengths, mels):
+        encoder_out = self.encoder(lyrics, pitches, singers, techniques, input_lengths)
         pred_durations, upsampled, _, weights = self.upsampler(
             encoder_out, durations, tempo, target_durations, input_lengths)
         output = self.decoder(upsampled, mels)
@@ -888,8 +912,8 @@ class Sodium(nn.Module):
 
         return output, postnet_output, pred_durations, weights
 
-    def infer(self, lyrics, pitches, durations, tempo):
-        encoder_out = self.encoder.infer(lyrics, pitches)
+    def infer(self, singers, techniques, lyrics, pitches, durations, tempo):
+        encoder_out = self.encoder.infer(lyrics, pitches, singers, techniques)
         upsampled, _, weights = self.upsampler.infer(encoder_out, durations, tempo)
         output = self.decoder.infer(upsampled)
 

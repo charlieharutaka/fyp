@@ -47,7 +47,9 @@ WAVENET_HP = {
 SODIUM_HP = {
     "embedding_lyric_dim": 256,
     "embedding_pitch_dim": 256,
-    "embedding_dim": 256,
+    "embedding_singer_dim": 16,
+    "embedding_technique_dim": 16,
+    "embedding_dim": 512,
     "encoder_prenet_num_convolutions": 3,
     "encoder_prenet_kernel_size": 5,
     "encoder_prenet_activation": nn.Identity(),
@@ -89,6 +91,8 @@ SODIUM_HP = {
 SODIUM_LARGE_HP = {
     "embedding_lyric_dim": 512,
     "embedding_pitch_dim": 512,
+    "embedding_singer_dim": 32,
+    "embedding_technique_dim": 32,
     "embedding_dim": 512,
     "encoder_prenet_num_convolutions": 3,
     "encoder_prenet_kernel_size": 5,
