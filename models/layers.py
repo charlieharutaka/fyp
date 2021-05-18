@@ -169,6 +169,7 @@ class ZoneOutLSTM(nn.Module):
                     cell = old_cell_states.narrow(0, self.num_layers + layer, 1).squeeze(0)
                     new_hidden, new_cell = self.cells[layer](output, (hidden, cell))
                     # Apply dropout on output
+                    output = new_hidden
                     if self.training and self.p_dropout > 0 and layer < self.num_layers - 1:
                         dropout = self.dropout.sample(new_hidden.shape).to(new_hidden)
                         output = new_hidden * dropout
