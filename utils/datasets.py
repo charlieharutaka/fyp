@@ -242,7 +242,10 @@ def transpose(notes: List[Note], step: int) -> List[Note]:
     """
     new_notes = []
     for note in notes:
-        new_pitch = note.pitch + step
+        if note.pitch != 0:
+            new_pitch = note.pitch + step
+        else:
+            new_pitch = 0
         new_note = dataclasses.replace(note, pitch=new_pitch)
         new_notes.append(new_note)
     return new_notes
