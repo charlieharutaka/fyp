@@ -7,6 +7,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributions as D
 
+import torchaudio
+
 from .tacotron import get_mask_from_lengths
 from .layers import ZoneOutLSTM
 from .utils import softclamp
@@ -39,6 +41,15 @@ Post-Net:
 
 
 """
+
+
+""" ----- Weight Init Funcs ----- """
+
+
+def init_uniform(m):
+    if type(m) == nn.Linear or type(m) == nn.Conv1d:
+        nn.init.uniform_(m.weight, -0.1, 0.1)
+        nn.init.uniform_(m.bias, -0.1, 0.1)
 
 
 """ ----- Utility Modules ----- """
@@ -195,6 +206,50 @@ class GaussianUpsampling(nn.Module):
         return upscaled, sequence_lengths, weights
 
 
+class SodiumPostnet(nn.Module):
+    def __init__(
+            self,
+            num_convolutions: int = 5,
+            features: int = 128,
+            hidden_features: int = 512,
+            kernel_size: int = 5,
+            activation: nn.Module = nn.Tanh()):
+        """
+        Simple post-net that applies sequential convolutions with batch norm.
+        Predicts a residual to add to the mel-spectrogram.
+        """
+        super(SodiumPostnet, self).__init__()
+        padding = (kernel_size - 1) // 2
+        self.num_convolutions = num_convolutions
+        self.convolutions = nn.ModuleList()
+        self.batch_norms = nn.ModuleList()
+        for i in range(num_convolutions):
+            self.convolutions.append(
+                nn.Conv1d(
+                    features if i == 0 else hidden_features,
+                    features if i == num_convolutions - 1 else hidden_features,
+                    kernel_size,
+                    padding=padding))
+            if i != num_convolutions - 1:
+                self.batch_norms.append(nn.BatchNorm1d(hidden_features))
+        self.activation = activation
+        self.convolutions.apply(init_uniform)
+
+    def forward(self, x: torch.FloatTensor) -> torch.FloatTensor:
+        """
+        Args:
+            x: (batch, features, sequence)
+        Returns:
+            x: (batch, features, sequence)
+        """
+        for i in range(self.num_convolutions - 1):
+            x = self.convolutions[i](x)
+            x = self.batch_norms[i](x)
+            x = self.activation(x)
+        x = self.convolutions[-1](x)
+        return x
+
+
 """ ----- Encoder Modules ----- """
 
 
@@ -238,6 +293,127 @@ class SodiumEncoderConvnet(nn.Module):
         return x
 
 
+class SodiumPitchPredictor(nn.Module):
+    """
+    Idea is to use formants to teach this dumb ass machine
+    """
+
+    def __init__(
+            self,
+            num_notes: int = 128,
+            n_fft: int = 2048,
+            n_mels: int = 512,
+            sample_rate: int = 16000,
+            num_convolutions: int = 3,
+            kernel_size: int = 5,
+            num_harmonics: int = 512,
+            concert_pitch: float = 440.0,
+            concert_a: int = 69):
+        super(SodiumPitchPredictor, self).__init__()
+        self.concert_pitch = concert_pitch
+        self.concert_a = concert_a
+        # Compute formant embedding weights and make embedding layer
+        self.mel_scale = torchaudio.transforms.MelScale(
+            n_mels=n_mels,
+            sample_rate=sample_rate,
+            f_min=0,
+            f_max=sample_rate // 2,
+            n_stft=n_fft)
+        formant_embedding = self._compute_formants(num_notes, num_harmonics, n_fft, sample_rate)
+        self.pitch_embedding = nn.Embedding.from_pretrained(formant_embedding, freeze=True)
+        # Convnet to finetune the formant
+        self.postnet = SodiumPostnet(
+            num_convolutions=num_convolutions,
+            features=n_mels,
+            hidden_features=n_mels,
+            kernel_size=kernel_size)
+
+    def _pitch2freq(self, pitch: torch.LongTensor) -> torch.FloatTensor:
+        """
+        Args:
+            pitch (*)
+        Returns:
+            freqs (*)
+        """
+        return self.concert_pitch * (2.0 ** ((pitch - self.concert_a) / 12.0))
+
+    def _compute_harmonics(self, freqs: torch.FloatTensor, num_harmonics: int = 100) -> torch.FloatTensor:
+        """
+        Computes harmonic frequencies in the frequency space.
+        Each harmonic is spaced linearly above the prior.
+
+        Args:
+            freqs (num_notes)
+        Returns:
+            harms (num_notes, n_harmonics)
+        """
+        harms = [freqs * harm for harm in range(1, num_harmonics + 1)]
+        return torch.stack(harms, dim=-1)
+
+    def _triangular_filter_bank(
+            self,
+            xs: torch.FloatTensor,
+            peaks: torch.FloatTensor,
+            half_widths: torch.FloatTensor,
+            responses: torch.FloatTensor) -> torch.FloatTensor:
+        """
+        Args:
+            xs (num_notes, n_fft)
+            peaks (num_notes, n_harms)
+            half_widths (num_notes, n_harms)
+            responses (num_notes, n_harms)
+        Returns:
+            formant (num_notes, n_fft)
+        """
+        xs = torch.abs(xs.unsqueeze(-1) - peaks.unsqueeze(-2))
+        half_widths = half_widths.unsqueeze(-2)
+        mask = ~(xs < half_widths)
+        result = 1 - (xs / half_widths)
+        result[mask] = 0
+        result = result * responses.unsqueeze(-2)
+        return torch.sum(result, dim=-1)
+
+    def _compute_formants(self, num_notes, num_harmonics, n_fft, sample_rate) -> torch.FloatTensor:
+        """
+        Computes formant embedding weights.
+
+        Args:
+            num_notes (int)
+            num_harmonics (int)
+            n_fft (int)
+            sample_rate (int)
+        Returns:
+            formants (num_notes, n_mels)
+        """
+        response_field = torch.linspace(0, sample_rate // 2, n_fft).reshape(1, -1).expand(num_notes, -1)
+        frequencies = self._pitch2freq(torch.arange(0, num_notes))
+        harmonics = self._compute_harmonics(frequencies, num_harmonics)
+        half_widths = torch.tensor([f0 for f0 in range(1, num_notes + 1)]
+                                   ).reshape(-1, 1).expand(-1, num_harmonics) / 2.0
+        response_weights = torch.tensor([1 / (harm ** 2)
+                                         for harm in range(1, num_harmonics + 1)]).reshape(1, -1).expand(num_notes, -1)
+        responses = self._triangular_filter_bank(response_field, harmonics, half_widths, response_weights)
+        mel_responses = self.mel_scale(responses.to(torch.float).transpose(0, 1))
+        # Since 0 is silent in the data, just make it all 0
+        mel_responses[0] = 0.0
+        # Do dynamic range compression to be consistent
+        mel_responses = torch.log(torch.clamp(mel_responses, min=1e-5)).transpose(0, 1)
+        return mel_responses
+
+    def forward(self, pitches: torch.LongTensor) -> torch.FloatTensor:
+        """
+        Args:
+            pitches (seq, batch)
+        Returns:
+            formants (seq, batch, output_dims)
+        """
+        output = self.pitch_embedding(pitches)
+        output = output.permute(1, 2, 0)
+        output = self.postnet(output)
+        output = output.permute(2, 0, 1)
+        return output
+
+
 class SodiumEncoder(nn.Module):
     """
     Using the idea that lyrics are sequence-dependent, but pitches are not:
@@ -245,6 +421,7 @@ class SodiumEncoder(nn.Module):
     3. LSTM/Transformer
     4. Concat with pitch projection and pass through postnet
     """
+
     def __init__(
             self,
             num_lyrics: int,
@@ -252,16 +429,19 @@ class SodiumEncoder(nn.Module):
             num_singers: int,
             num_techniques: int,
             embedding_lyric_dim: int = 256,
-            embedding_pitch_dim: int = 256,
+            embedding_pitch_dim: int = 512,
             embedding_singer_dim: int = 16,
             embedding_technique_dim: int = 16,
-            embedding_dim: int = 512,
+            pp_n_fft: int = 2048,
+            sample_rate: int = 16000,
+            pp_num_convolutions: int = 3,
+            pp_kernel_size: int = 5,
+            pp_num_harmonics: int = 512,
+            concert_pitch: float = 440.0,
+            concert_a: int = 69,
             prenet_num_convolutions: int = 3,
             prenet_kernel_size: int = 5,
             prenet_activation: nn.Module = nn.Identity(),
-            postnet_num_convolutions: int = 3,
-            postnet_kernel_size: int = 5,
-            postnet_activation: nn.Module = nn.Tanh(),
             p_dropout: float = 0.1,
             use_transformer: bool = True,
             transformer_nlayers: int = 8,
@@ -272,9 +452,19 @@ class SodiumEncoder(nn.Module):
             lstm_zoneout: float = 0.1):
         super(SodiumEncoder, self).__init__()
         self.embedding_lyrics = nn.Embedding(num_lyrics, embedding_lyric_dim)
-        self.embedding_pitches = nn.Linear(1, embedding_pitch_dim)
         self.embedding_singers = nn.Embedding(num_singers, embedding_singer_dim)
         self.embedding_techniques = nn.Embedding(num_techniques, embedding_technique_dim)
+
+        self.pitch_predictor = SodiumPitchPredictor(
+            num_notes=num_pitches,
+            n_fft=pp_n_fft,
+            n_mels=embedding_pitch_dim,
+            sample_rate=sample_rate,
+            num_convolutions=pp_num_convolutions,
+            kernel_size=pp_kernel_size,
+            num_harmonics=pp_num_harmonics,
+            concert_pitch=concert_pitch,
+            concert_a=concert_a)
 
         self.prenet = SodiumEncoderConvnet(
             num_convolutions=prenet_num_convolutions,
@@ -297,13 +487,6 @@ class SodiumEncoder(nn.Module):
                 bidirectional=True,
                 num_layers=lstm_num_layers,
                 zoneout=lstm_zoneout)
-
-        self.postnet = SodiumEncoderConvnet(
-            num_convolutions=postnet_num_convolutions,
-            input_features=embedding_lyric_dim + embedding_pitch_dim + embedding_singer_dim + embedding_technique_dim,
-            output_features=embedding_dim,
-            kernel_size=postnet_kernel_size,
-            activation=postnet_activation)
 
     def forward(
             self,
@@ -337,15 +520,10 @@ class SodiumEncoder(nn.Module):
         else:
             lyrics, _ = self.encoder(lyrics)
 
-        pitches = self.embedding_pitches(pitches.to(torch.float).unsqueeze(-1))
+        pitches = self.pitch_predictor(pitches)
         singer_embedding = self.embedding_singers(singers).unsqueeze(0).expand(lyrics.shape[0], -1, -1)
         technique_embedding = self.embedding_techniques(techniques).unsqueeze(0).expand(lyrics.shape[0], -1, -1)
         output = torch.cat([lyrics, pitches, singer_embedding, technique_embedding], dim=-1)
-        # pass through postnet
-        output = output.permute(1, 2, 0)
-        output = self.postnet(output)
-        output = output.permute(2, 0, 1)
-
         return output
 
     def infer(
@@ -376,15 +554,10 @@ class SodiumEncoder(nn.Module):
         else:
             lyrics, _ = self.encoder(lyrics)
 
-        pitches = self.embedding_pitches(pitches.to(torch.float).unsqueeze(-1))
+        pitches = self.pitch_predictor(pitches)
         singer_embedding = self.embedding_singers(singers).unsqueeze(0).expand(lyrics.shape[0], -1, -1)
         technique_embedding = self.embedding_techniques(techniques).unsqueeze(0).expand(lyrics.shape[0], -1, -1)
         output = torch.cat([lyrics, pitches, singer_embedding, technique_embedding], dim=-1)
-        # pass through postnet
-        output = output.permute(1, 2, 0)
-        output = self.postnet(output)
-        output = output.permute(2, 0, 1)
-
         return output
 
 
@@ -654,6 +827,7 @@ class SodiumDecoder(nn.Module):
                         hidden_size=decoder_dim)
             for i in range(decoder_n_layers)])
         self.projection = nn.Linear(decoder_dim + embedding_dim, output_dim)
+        init_uniform(self.projection)
 
     def init_go_frame(self, encoder_out: torch.FloatTensor) -> torch.FloatTensor:
         """
@@ -707,12 +881,12 @@ class SodiumDecoder(nn.Module):
                 old_cell_state = self.cell_states[layer]
                 new_hidden_state, new_cell_state =\
                     self.decoder[layer](output, (old_hidden_state, old_cell_state))
-                
+
                 # ZoneOut
                 zoneout_h = self.zoneout.sample(new_hidden_state.shape).to(new_hidden_state)
                 zoneout_c = self.zoneout.sample(new_cell_state.shape).to(new_cell_state)
-                self.hidden_states[layer] =  (new_hidden_state * (1 - zoneout_h)) + (old_hidden_state * zoneout_h)
-                self.cell_states[layer] =  (new_cell_state * (1 - zoneout_c)) + (old_cell_state * zoneout_c)
+                self.hidden_states[layer] = (new_hidden_state * (1 - zoneout_h)) + (old_hidden_state * zoneout_h)
+                self.cell_states[layer] = (new_cell_state * (1 - zoneout_c)) + (old_cell_state * zoneout_c)
 
                 output = self.hidden_states[layer]
             outputs.append(output)
@@ -754,47 +928,9 @@ class SodiumDecoder(nn.Module):
             return torch.empty((0, encoder_out.shape[1], self.output_dim))
 
 
-class SodiumPostnet(nn.Module):
-    def __init__(
-            self,
-            num_convolutions: int = 5,
-            features: int = 128,
-            hidden_features: int = 512,
-            kernel_size: int = 5,
-            activation: nn.Module = nn.Tanh()):
-        """
-        Simple post-net that applies sequential convolutions with batch norm.
-        Predicts a residual to add to the mel-spectrogram.
-        """
-        super(SodiumPostnet, self).__init__()
-        padding = (kernel_size - 1) // 2
-        self.num_convolutions = num_convolutions
-        self.convolutions = nn.ModuleList()
-        self.batch_norms = nn.ModuleList()
-        for i in range(num_convolutions):
-            self.convolutions.append(
-                nn.Conv1d(
-                    features if i == 0 else hidden_features,
-                    features if i == num_convolutions - 1 else hidden_features,
-                    kernel_size,
-                    padding=padding))
-            if i != num_convolutions - 1:
-                self.batch_norms.append(nn.BatchNorm1d(hidden_features))
-        self.activation = activation
-
-    def forward(self, x: torch.FloatTensor) -> torch.FloatTensor:
-        """
-        Args:
-            x: (batch, features, sequence)
-        Returns:
-            x: (batch, features, sequence)
-        """
-        for i in range(self.num_convolutions - 1):
-            x = self.convolutions[i](x)
-            x = self.batch_norms[i](x)
-            x = self.activation(x)
-        x = self.convolutions[-1](x)
-        return x
+class SodiumTransformerDecoder(nn.Module):
+    def __init__(self):
+        pass
 
 
 """ ---- The saltiest NN known to mankind ---- """
@@ -808,16 +944,19 @@ class Sodium(nn.Module):
             num_singers: int,
             num_techniques: int,
             embedding_lyric_dim: int = 256,
-            embedding_pitch_dim: int = 256,
+            embedding_pitch_dim: int = 512,
             embedding_singer_dim: int = 16,
             embedding_technique_dim: int = 16,
-            embedding_dim: int = 512,
+            encoder_pp_n_fft: int = 2048,
+            sample_rate: int = 16000,
+            encoder_pp_num_convolutions: int = 3,
+            encoder_pp_kernel_size: int = 5,
+            encoder_pp_num_harmonics: int = 512,
+            concert_pitch: float = 440.0,
+            concert_a: int = 69,
             encoder_prenet_num_convolutions: int = 3,
             encoder_prenet_kernel_size: int = 5,
             encoder_prenet_activation: nn.Module = nn.Identity(),
-            encoder_postnet_num_convolutions: int = 3,
-            encoder_postnet_kernel_size: int = 5,
-            encoder_postnet_activation: nn.Module = nn.Tanh(),
             encoder_p_dropout: float = 0.1,
             encoder_use_transformer: bool = True,
             encoder_transformer_nlayers: int = 8,
@@ -855,14 +994,17 @@ class Sodium(nn.Module):
             embedding_pitch_dim=embedding_pitch_dim,
             embedding_singer_dim=embedding_singer_dim,
             embedding_technique_dim=embedding_technique_dim,
-            embedding_dim=embedding_dim,
             prenet_num_convolutions=encoder_prenet_num_convolutions,
             prenet_kernel_size=encoder_prenet_kernel_size,
             prenet_activation=encoder_prenet_activation,
-            postnet_num_convolutions=encoder_postnet_num_convolutions,
-            postnet_kernel_size=encoder_postnet_kernel_size,
-            postnet_activation=encoder_postnet_activation,
+            pp_n_fft=encoder_pp_n_fft,
+            sample_rate=sample_rate,
+            pp_num_convolutions=encoder_pp_num_convolutions,
+            pp_kernel_size=encoder_pp_kernel_size,
+            pp_num_harmonics=encoder_pp_num_harmonics,
             p_dropout=encoder_p_dropout,
+            concert_pitch=concert_pitch,
+            concert_a=concert_a,
             use_transformer=encoder_use_transformer,
             transformer_nlayers=encoder_transformer_nlayers,
             transformer_nhead=encoder_transformer_nhead,
@@ -870,8 +1012,9 @@ class Sodium(nn.Module):
             transformer_activation=encoder_transformer_activation,
             lstm_num_layers=encoder_lstm_num_layers,
             lstm_zoneout=encoder_lstm_zoneout)
+        encoder_out_dim = embedding_lyric_dim + embedding_pitch_dim + embedding_singer_dim + embedding_technique_dim
         self.upsampler = SodiumUpsampler(
-            embedding_dim=embedding_dim,
+            embedding_dim=encoder_out_dim,
             duration_hidden_dim=duration_hidden_dim,
             duration_n_layers=duration_n_layers,
             duration_bias=duration_bias,
@@ -883,7 +1026,7 @@ class Sodium(nn.Module):
             pos_embedding_denom=pos_embedding_denom,
             pos_embedding_max_len=pos_embedding_max_len)
         self.decoder = SodiumDecoder(
-            embedding_dim=embedding_dim + pos_embedding_dim,
+            embedding_dim=encoder_out_dim + pos_embedding_dim,
             prenet_n_layers=decoder_prenet_n_layers,
             prenet_dim=decoder_prenet_dim,
             prenet_activation=decoder_prenet_activation,
