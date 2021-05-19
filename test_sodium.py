@@ -137,11 +137,17 @@ print(f"Training with {len(loader_train)} batches")
 
 print("==========")
 
-model = Sodium(num_lyrics=len(encoding), num_pitches=128, num_singers=len(all_singers), num_techniques=len(all_techniques), **SODIUM_HP)
+model = Sodium(
+    num_lyrics=len(encoding),
+    num_pitches=128,
+    num_singers=len(all_singers),
+    num_techniques=len(all_techniques),
+    **SODIUM_HP)
 model.to(device)
 params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print("Total number of parameters is: {}".format(params))
-optimizer = torch.optim.Adam(model.parameters())
+optimizer = torch.optim.Adam(model.parameters(), weight_decay=1e-6)
+
 
 def prepare_data(batch):
     singers = []
@@ -152,7 +158,7 @@ def prepare_data(batch):
     for technique in batch[2]:
         techniques.append(techniques2idx[technique])
     techniques = torch.tensor(techniques, dtype=torch.long).to(device)
-    
+
     notes_lens = batch[6]
     lyrics = []
     pitches = []
@@ -194,7 +200,8 @@ def get_loss(output, output_postnet, pred_durations, mels, target_durations, out
     max_out_len = torch.max(output_lengths).item()
     ids = torch.arange(0, max_out_len, out=output_lengths.new_empty(
         (max_out_len,), dtype=torch.long))
-    mask = (ids < output_lengths.unsqueeze(1)).bool().transpose(0, 1).unsqueeze(-1) # seq first
+    mask = (ids < output_lengths.unsqueeze(1)).bool().transpose(0, 1).unsqueeze(-1)  # seq first
+    mask = mask.to(output.device)
     output = output * mask
     output_postnet = output_postnet * mask
     mels = mels * mask
@@ -215,7 +222,9 @@ EPOCH_LEN = len(loader_train)
 run_name = datetime.now().strftime("%b%d_%H-%M-%S_kaguya")
 os.mkdir(run_name)
 writer = SummaryWriter(f'runs/sodium/{run_name}')
-writer.add_text("Notes", "n_fft=800, n_mels=192, f_min=80.0, f_max=8000.0, clipped on both ends, range clipping 0.1, pitch only no encoder, decoder zoneout, data augmentation [-1, 0, 1]")
+writer.add_text(
+    "Notes",
+    "n_fft=800, n_mels=192, f_min=80.0, f_max=8000.0, clipped on both ends, range clipping 0.1, pitch only no encoder, decoder zoneout, data augmentation [-1, 0, 1], with singer/technique embedding & formant synthesis")
 model.train()
 
 all_mel_losses = []
@@ -235,7 +244,8 @@ for epoch in range(1, NUM_EPOCHS + 1):
     for t, batch in enumerate(loader_train, 1):
         optimizer.zero_grad()
 
-        singers, techniques, lyrics, pitches, rhythms, notes_lens, mels, tempos, computed_tempos, target_durations, mel_lens = prepare_data(batch)
+        singers, techniques, lyrics, pitches, rhythms, notes_lens, mels, tempos, computed_tempos, target_durations, mel_lens = prepare_data(
+            batch)
 
         lyrics = lyrics.transpose(0, 1)
         pitches = pitches.transpose(0, 1)
@@ -273,7 +283,8 @@ for epoch in range(1, NUM_EPOCHS + 1):
         duration_losses = []
         losses = []
         for t, batch in enumerate(loader_val, 1):
-            singers, techniques, lyrics, pitches, rhythms, notes_lens, mels, tempos, computed_tempos, target_durations, mel_lens = prepare_data(batch)
+            singers, techniques, lyrics, pitches, rhythms, notes_lens, mels, tempos, computed_tempos, target_durations, mel_lens = prepare_data(
+                batch)
 
             lyrics = lyrics.transpose(0, 1)
             pitches = pitches.transpose(0, 1)
@@ -305,20 +316,22 @@ for epoch in range(1, NUM_EPOCHS + 1):
 
         # Forced illustrations
         output, output_postnet, pred_durations, weights = model(
-            fixed_lyrics, fixed_pitches, fixed_rhythm, fixed_computed_tempo, fixed_target_durations, fixed_notes_len, fixed_mel)
+            fixed_singer, fixed_technique, fixed_lyrics, fixed_pitches, 
+            fixed_rhythm, fixed_computed_tempo, fixed_target_durations, 
+            fixed_notes_len, fixed_mel)
 
         # Duration illustration
         fig, ax = plt.subplots(figsize=(10, 5))
-        im = ax.imshow(weights[:,0,:].cpu(),
+        im = ax.imshow(weights[:, 0, :].cpu(),
                        aspect='auto', origin='lower', interpolation='nearest')
         fig.colorbar(im)
         writer.add_figure("Forced Duration Weights", fig, epoch - 1)
         fig.savefig(f'{run_name}/forced.duration.{epoch}.png')
-        
+
         # Spectrogram illustration
         fig, ax = plt.subplots(figsize=(10, 5))
         im = ax.imshow(
-            output_postnet[:,0].cpu().transpose(
+            output_postnet[:, 0].cpu().transpose(
                 0,
                 1),
             aspect='auto',
@@ -331,16 +344,16 @@ for epoch in range(1, NUM_EPOCHS + 1):
 
         # Inference illustrations
         output, output_postnet, weights = model.infer(
-            fixed_lyrics, fixed_pitches, fixed_rhythm, fixed_computed_tempo)
+            fixed_singer, fixed_technique, fixed_lyrics, fixed_pitches, fixed_rhythm, fixed_computed_tempo)
 
         # Duration illustration
         fig, ax = plt.subplots(figsize=(10, 5))
-        im = ax.imshow(weights[:,0,:].cpu(),
+        im = ax.imshow(weights[:, 0, :].cpu(),
                        aspect='auto', origin='lower', interpolation='nearest')
         fig.colorbar(im)
         writer.add_figure("Inferred Duration Weights", fig, epoch - 1)
         fig.savefig(f'{run_name}/infer.duration.{epoch}.png')
-        
+
         # Spectrogram illustration
         fig, ax = plt.subplots(figsize=(10, 5))
         im = ax.imshow(
