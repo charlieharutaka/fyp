@@ -16,6 +16,7 @@ from models.sodium import Sodium
 from utils.datasets import VocalSetDataset, vocal_data_collate_fn
 from utils.arpabet import ARPABET, ArpabetEncoding, START, END
 from utils.musicxml import Note
+from utils.schedulers import LinearRampupDecayScheduler
 from utils.transforms import PowerToDecibelTransform, ScaleToIntervalTransform, DynamicRangeCompression
 from utils import round_preserve_sum
 from hparams import SODIUM_HP
@@ -146,7 +147,8 @@ model = Sodium(
 model.to(device)
 params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print("Total number of parameters is: {}".format(params))
-optimizer = torch.optim.Adam(model.parameters(), weight_decay=1e-6)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-6)
+scheduler = LinearRampupDecayScheduler(optimizer, 0.001, 0.1, 4000, 0.98625, 1000)
 
 
 def prepare_data(batch):
@@ -260,6 +262,7 @@ for epoch in range(1, NUM_EPOCHS + 1):
         loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
+        scheduler.step()
         # Loss
         losses.append(loss.item())
         global_step = t + (EPOCH_LEN * (epoch - 1))
