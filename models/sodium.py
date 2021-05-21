@@ -562,16 +562,20 @@ class SodiumEncoder(nn.Module):
 
 
 class SodiumDurationPredictor(nn.Module):
-    def __init__(self, embedding_dim: int = 512, hidden_dim: int = 256, n_layers: int = 1, bias: bool = False):
+    def __init__(self, hidden_dim: int = 256, bias: bool = False):
         super(SodiumDurationPredictor, self).__init__()
-        self.lstm = nn.LSTM(
-            input_size=embedding_dim + 1,
-            hidden_size=(
-                hidden_dim // 2),
-            bidirectional=True,
-            num_layers=n_layers,
-            bias=bias)
-        self.projection = nn.Linear(hidden_dim, 1, bias=bias)
+        # self.lstm = nn.LSTM(
+        #     input_size=embedding_dim + 1,
+        #     hidden_size=(
+        #         hidden_dim // 2),
+        #     bidirectional=True,
+        #     num_layers=n_layers,
+        #     bias=bias)
+        self.projection = nn.Sequential(
+            nn.Linear(1, hidden_dim, bias=bias),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1, bias=bias),
+            nn.ReLU())
 
     def forward(
             self,
@@ -594,13 +598,13 @@ class SodiumDurationPredictor(nn.Module):
         durations = (durations / tempo) * 60.0
         durations = durations.unsqueeze(-1)
         # TODO: is it really necessary to have an entire LSTM for this??
-        lstm_in = torch.cat([durations, encoder_output], dim=-1)
-        lstm_in = nn.utils.rnn.pack_padded_sequence(lstm_in, input_lengths)
-        self.lstm.flatten_parameters()
-        lstm_out, _ = self.lstm(lstm_in)
-        lstm_out, _ = nn.utils.rnn.pad_packed_sequence(lstm_out)
+        # lstm_in = torch.cat([durations, encoder_output], dim=-1)
+        # lstm_in = nn.utils.rnn.pack_padded_sequence(lstm_in, input_lengths)
+        # self.lstm.flatten_parameters()
+        # lstm_out, _ = self.lstm(lstm_in)
+        # lstm_out, _ = nn.utils.rnn.pad_packed_sequence(lstm_out)
         # Projection
-        pred_durations = F.relu(self.projection(lstm_out))
+        pred_durations = self.projection(durations)
         return pred_durations.squeeze(2)
 
     def infer(
@@ -618,12 +622,14 @@ class SodiumDurationPredictor(nn.Module):
         """
         durations = (durations / tempo) * 60.0
         durations = durations.unsqueeze(-1)
-
-        lstm_in = torch.cat([durations, encoder_output], dim=-1)
-        self.lstm.flatten_parameters()
-        lstm_out, _ = self.lstm(lstm_in)
-
-        pred_durations = F.relu(self.projection(lstm_out))
+        # TODO: is it really necessary to have an entire LSTM for this??
+        # lstm_in = torch.cat([durations, encoder_output], dim=-1)
+        # lstm_in = nn.utils.rnn.pack_padded_sequence(lstm_in, input_lengths)
+        # self.lstm.flatten_parameters()
+        # lstm_out, _ = self.lstm(lstm_in)
+        # lstm_out, _ = nn.utils.rnn.pad_packed_sequence(lstm_out)
+        # Projection
+        pred_durations = self.projection(durations)
         return pred_durations.squeeze(2)
 
 
@@ -679,7 +685,7 @@ class SodiumRangePredictor(nn.Module):
         # else:
         if self.clip > 0.0:
             pred_ranges = torch.minimum(pred_ranges, self.clip * durations_output)
-        pred_ranges = F.softplus(pred_ranges)
+        pred_ranges = F.softplus(pred_ranges) + 1e-5 # for numerical stability
         return pred_ranges
 
     def infer(self, encoder_output: torch.FloatTensor, durations_output: torch.LongTensor) -> torch.FloatTensor:
@@ -708,7 +714,7 @@ class SodiumUpsampler(nn.Module):
             self,
             embedding_dim: int = 512,
             duration_hidden_dim: int = 256,
-            duration_n_layers: int = 1,
+            # duration_n_layers: int = 1,
             duration_bias: bool = False,
             range_hidden_dim: int = 256,
             range_n_layers: int = 1,
@@ -719,9 +725,9 @@ class SodiumUpsampler(nn.Module):
             pos_embedding_max_len: int = 1000):
         super(SodiumUpsampler, self).__init__()
         self.duration_predictor = SodiumDurationPredictor(
-            embedding_dim=embedding_dim,
+            # embedding_dim=embedding_dim,
             hidden_dim=duration_hidden_dim,
-            n_layers=duration_n_layers,
+            # n_layers=duration_n_layers,
             bias=duration_bias)
         self.range_predictor = SodiumRangePredictor(
             embedding_dim=embedding_dim,
@@ -784,7 +790,7 @@ class SodiumUpsampler(nn.Module):
             weights: (sequence_in, batch, sequence_out)
         """
         pred_durations = self.duration_predictor.infer(encoder_output, durations, tempo)
-        pred_durations = pred_durations.to(torch.long)
+        pred_durations = torch.round(pred_durations).to(torch.long)
         pred_ranges = self.range_predictor.infer(encoder_output, pred_durations).squeeze(2)
         upsampled, upsampled_lengths, weights = self.upsampler(encoder_output, pred_durations, pred_ranges)
         pe = self.pos_embedding(pred_durations)
@@ -966,7 +972,7 @@ class Sodium(nn.Module):
             encoder_lstm_num_layers: int = 1,
             encoder_lstm_zoneout: float = 0.1,
             duration_hidden_dim: int = 256,
-            duration_n_layers: int = 1,
+            # duration_n_layers: int = 1,
             duration_bias: bool = False,
             range_hidden_dim: int = 256,
             range_n_layers: int = 1,
@@ -1016,7 +1022,7 @@ class Sodium(nn.Module):
         self.upsampler = SodiumUpsampler(
             embedding_dim=encoder_out_dim,
             duration_hidden_dim=duration_hidden_dim,
-            duration_n_layers=duration_n_layers,
+            # duration_n_layers=duration_n_layers,
             duration_bias=duration_bias,
             range_hidden_dim=range_hidden_dim,
             range_n_layers=range_n_layers,

@@ -16,10 +16,10 @@ from models.sodium import Sodium
 from utils.datasets import VocalSetDataset, vocal_data_collate_fn
 from utils.arpabet import ARPABET, ArpabetEncoding, START, END
 from utils.musicxml import Note
-from utils.schedulers import LinearRampupDecayScheduler
+from utils.schedulers import LinearRampupDecayScheduler, LinearRampupCosineAnnealingScheduler
 from utils.transforms import PowerToDecibelTransform, ScaleToIntervalTransform, DynamicRangeCompression
 from utils import round_preserve_sum
-from hparams import SODIUM_HP
+from hparams import SODIUM_HP, SODIUM_LARGE_HP
 
 
 CUDA_IS_AVAILABLE = torch.cuda.is_available()
@@ -31,7 +31,7 @@ else:
 
 print("==========")
 
-BATCH_SIZE = 16
+BATCH_SIZE = 8
 
 print(f"Batch size: {BATCH_SIZE}")
 
@@ -134,7 +134,7 @@ fixed_rhythm = fixed_rhythm.transpose(0, 1)
 fixed_mel = fixed_mel.transpose(0, 1)
 fixed_target_durations = fixed_target_durations.transpose(0, 1)
 
-print(f"Training with {len(loader_train)} batches")
+print(f"Training with {len(loader_train)} batches/epoch")
 
 print("==========")
 
@@ -143,12 +143,15 @@ model = Sodium(
     num_pitches=128,
     num_singers=len(all_singers),
     num_techniques=len(all_techniques),
-    **SODIUM_HP)
+    **SODIUM_LARGE_HP)
 model.to(device)
 params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print("Total number of parameters is: {}".format(params))
-optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-6)
-scheduler = LinearRampupDecayScheduler(optimizer, 0.001, 0.1, 4000, 0.98625, 1000)
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-5, weight_decay=1e-6)
+# Ramp up in 1 epoch and decay by half every 10 epochs after
+# scheduler = LinearRampupDecayScheduler(optimizer, 0.001, 0.05, len(loader_train), 0.5 ** (1 / 10), len(loader_train))
+scheduler = LinearRampupCosineAnnealingScheduler(
+    optimizer, 1e-5, 1e-2, 1e-4, len(loader_train), len(loader_train), max_lr_decay=0.5 ** (1 / 10))
 
 
 def prepare_data(batch):
@@ -226,7 +229,7 @@ os.mkdir(run_name)
 writer = SummaryWriter(f'runs/sodium/{run_name}')
 writer.add_text(
     "Notes",
-    "n_fft=800, n_mels=192, f_min=80.0, f_max=8000.0, clipped on both ends, range clipping 0.1, pitch only no encoder, decoder zoneout, data augmentation [-1, 0, 1], with singer/technique embedding & formant synthesis")
+    "BIG SODIUM! n_fft=800, n_mels=192, f_min=80.0, f_max=8000.0, clipped on both ends, range clipping 0.1, pitch only no encoder, decoder zoneout, data augmentation [-1, 0, 1], with singer/technique embedding & formant synthesis & LR schedule with better scheduling & 100 epochs with cosine annealing with linear max LR rampdown")
 model.train()
 
 all_mel_losses = []
@@ -319,8 +322,8 @@ for epoch in range(1, NUM_EPOCHS + 1):
 
         # Forced illustrations
         output, output_postnet, pred_durations, weights = model(
-            fixed_singer, fixed_technique, fixed_lyrics, fixed_pitches, 
-            fixed_rhythm, fixed_computed_tempo, fixed_target_durations, 
+            fixed_singer, fixed_technique, fixed_lyrics, fixed_pitches,
+            fixed_rhythm, fixed_computed_tempo, fixed_target_durations,
             fixed_notes_len, fixed_mel)
 
         # Duration illustration
