@@ -685,7 +685,7 @@ class SodiumRangePredictor(nn.Module):
         # else:
         if self.clip > 0.0:
             pred_ranges = torch.minimum(pred_ranges, self.clip * durations_output)
-        pred_ranges = F.softplus(pred_ranges) + 1e-5 # for numerical stability
+        pred_ranges = F.softplus(pred_ranges) + 1 # for numerical stability and stopping the model from doing stupid sh*t
         return pred_ranges
 
     def infer(self, encoder_output: torch.FloatTensor, durations_output: torch.LongTensor) -> torch.FloatTensor:
@@ -700,7 +700,11 @@ class SodiumRangePredictor(nn.Module):
         lstm_in = torch.cat([durations_output, encoder_output], dim=-1)
         self.lstm.flatten_parameters()
         lstm_out, _ = self.lstm(lstm_in)
-        pred_ranges = F.softplus(self.projection(lstm_out))
+        
+        pred_ranges = self.projection(lstm_out)
+        if self.clip > 0.0:
+            pred_ranges = torch.minimum(pred_ranges, self.clip * durations_output)
+        pred_ranges = F.softplus(pred_ranges) + 1 # for numerical stability and stopping the model from doing stupid sh*t
         return pred_ranges
 
 

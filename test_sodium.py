@@ -229,7 +229,7 @@ os.mkdir(run_name)
 writer = SummaryWriter(f'runs/sodium/{run_name}')
 writer.add_text(
     "Notes",
-    "BIG SODIUM! n_fft=800, n_mels=192, f_min=80.0, f_max=8000.0, clipped on both ends, range clipping 0.1, pitch only no encoder, decoder zoneout, data augmentation [-1, 0, 1], with singer/technique embedding & formant synthesis & LR schedule with better scheduling & 100 epochs with cosine annealing with linear max LR rampdown")
+    "BIG SODIUM 3! n_fft=800, n_mels=192, f_min=80.0, f_max=8000.0, clipped on both ends, range clipping 0.1, pitch only no encoder, decoder zoneout, data augmentation [-1, 0, 1], with singer/technique embedding & formant synthesis & LR schedule with better scheduling & 100 epochs with cosine annealing with linear max LR rampdown")
 model.train()
 
 all_mel_losses = []
@@ -261,7 +261,7 @@ for epoch in range(1, NUM_EPOCHS + 1):
         output, output_postnet, pred_durations, weights = model(
             singers, techniques, lyrics, pitches, rhythms, computed_tempos, target_durations, notes_lens, mels)
         loss, mel_loss, postnet_loss, duration_loss = get_loss(
-            output, output_postnet, pred_durations, mels, target_durations, mel_lens, lambda_dur=0.1)
+            output, output_postnet, pred_durations, mels, target_durations, mel_lens, lambda_dur=1.0)
         loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
@@ -301,7 +301,7 @@ for epoch in range(1, NUM_EPOCHS + 1):
             output, output_postnet, pred_durations, weights = model(
                 singers, techniques, lyrics, pitches, rhythms, computed_tempos, target_durations, notes_lens, mels)
             loss, mel_loss, postnet_loss, duration_loss = get_loss(
-                output, output_postnet, pred_durations, mels, target_durations, mel_lens, lambda_dur=0.1)
+                output, output_postnet, pred_durations, mels, target_durations, mel_lens, lambda_dur=1.0)
 
             mel_losses.append(mel_loss.item())
             postnet_losses.append(postnet_loss.item())
