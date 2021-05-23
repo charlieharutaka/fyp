@@ -1,4 +1,5 @@
 import math
+import random
 from typing import Tuple
 import warnings
 
@@ -868,7 +869,7 @@ class SodiumDecoder(nn.Module):
                 (batch, self.decoder_dim), requires_grad=True) for _ in range(
                 self.decoder_n_layers)]
 
-    def forward(self, encoder_out: torch.FloatTensor, mels: torch.FloatTensor) -> torch.FloatTensor:
+    def forward(self, encoder_out: torch.FloatTensor, mels: torch.FloatTensor, teacher_forced_ratio: float = 1.0) -> torch.FloatTensor:
         """
         Teacher-forced training.
         Args:
@@ -884,7 +885,13 @@ class SodiumDecoder(nn.Module):
         self.init_rnn_states(encoder_out)
         outputs = []
         for frame in range(encoder_out.shape[0]):
-            output = torch.cat((decoder_inputs[frame], encoder_out[frame]), dim=-1)
+            # Randomly use previous frame instead of teacher forcing
+            if random.random() < teacher_forced_ratio or len(outputs) == 0:
+                last_frame = decoder_inputs[frame]
+            else:
+                last_frame = outputs[-1]
+                last_frame = self.pre_net(last_frame)
+            output = torch.cat((last_frame, encoder_out[frame]), dim=-1)
             # output has size (batch, prenet_dim + embedding_dim)
             for layer in range(self.decoder_n_layers):
                 old_hidden_state = self.hidden_states[layer]
@@ -899,13 +906,12 @@ class SodiumDecoder(nn.Module):
                 self.cell_states[layer] = (new_cell_state * (1 - zoneout_c)) + (old_cell_state * zoneout_c)
 
                 output = self.hidden_states[layer]
+            output = torch.cat([output, encoder_out[frame]], dim=-1)
+            output = self.projection(output)
             outputs.append(output)
 
         outputs = torch.stack(outputs, dim=0)
-        output = torch.cat((outputs, encoder_out), dim=-1)
-        output = self.projection(output)
-
-        return output
+        return outputs
 
     def infer(self, encoder_out: torch.FloatTensor) -> torch.FloatTensor:
         """
@@ -1052,11 +1058,11 @@ class Sodium(nn.Module):
             kernel_size=postnet_kernel_size,
             activation=postnet_activation)
 
-    def forward(self, singers, techniques, lyrics, pitches, durations, tempo, target_durations, input_lengths, mels):
+    def forward(self, singers, techniques, lyrics, pitches, durations, tempo, target_durations, input_lengths, mels, teacher_forced_ratio: float = 1.0):
         encoder_out = self.encoder(lyrics, pitches, singers, techniques, input_lengths)
         pred_durations, upsampled, _, weights = self.upsampler(
             encoder_out, durations, tempo, target_durations, input_lengths)
-        output = self.decoder(upsampled, mels)
+        output = self.decoder(upsampled, mels, teacher_forced_ratio=teacher_forced_ratio)
 
         postnet_output = output.permute(1, 2, 0)
         postnet_output = self.post_net(postnet_output)

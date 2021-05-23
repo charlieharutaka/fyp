@@ -229,7 +229,7 @@ os.mkdir(run_name)
 writer = SummaryWriter(f'runs/sodium/{run_name}')
 writer.add_text(
     "Notes",
-    "BIG SODIUM 3! n_fft=800, n_mels=192, f_min=80.0, f_max=8000.0, clipped on both ends, range clipping 0.1, pitch only no encoder, decoder zoneout, data augmentation [-1, 0, 1], with singer/technique embedding & formant synthesis & LR schedule with better scheduling & 100 epochs with cosine annealing with linear max LR rampdown")
+    "BIG SODIUM 3! n_fft=800, n_mels=192, f_min=80.0, f_max=8000.0, clipped on both ends, range clipping 0.1, pitch only no encoder, decoder zoneout, data augmentation [-1, 0, 1], with singer/technique embedding & formant synthesis & LR schedule with better scheduling & 100 epochs with cosine annealing with linear max LR rampdown & curriculum learning")
 model.train()
 
 all_mel_losses = []
@@ -241,6 +241,8 @@ validation_mel_losses = []
 validation_post_mel_losses = []
 validation_duration_losses = []
 validation_losses = []
+
+teacher_forced_ratio = 1.0
 
 for epoch in range(1, NUM_EPOCHS + 1):
     print(f"=== Epoch {epoch} ===")
@@ -259,7 +261,7 @@ for epoch in range(1, NUM_EPOCHS + 1):
         mels = mels.transpose(0, 1)
 
         output, output_postnet, pred_durations, weights = model(
-            singers, techniques, lyrics, pitches, rhythms, computed_tempos, target_durations, notes_lens, mels)
+            singers, techniques, lyrics, pitches, rhythms, computed_tempos, target_durations, notes_lens, mels, teacher_forced_ratio=teacher_forced_ratio)
         loss, mel_loss, postnet_loss, duration_loss = get_loss(
             output, output_postnet, pred_durations, mels, target_durations, mel_lens, lambda_dur=1.0)
         loss.backward()
@@ -299,7 +301,7 @@ for epoch in range(1, NUM_EPOCHS + 1):
             mels = mels.transpose(0, 1)
 
             output, output_postnet, pred_durations, weights = model(
-                singers, techniques, lyrics, pitches, rhythms, computed_tempos, target_durations, notes_lens, mels)
+                singers, techniques, lyrics, pitches, rhythms, computed_tempos, target_durations, notes_lens, mels, teacher_forced_ratio=teacher_forced_ratio)
             loss, mel_loss, postnet_loss, duration_loss = get_loss(
                 output, output_postnet, pred_durations, mels, target_durations, mel_lens, lambda_dur=1.0)
 
@@ -385,5 +387,7 @@ for epoch in range(1, NUM_EPOCHS + 1):
     torch.save(validation_post_mel_losses, f"{run_name}/validation_post_mel_losses.pt")
     torch.save(validation_duration_losses, f"{run_name}/validation_duration_losses.pt")
     torch.save(validation_losses, f"{run_name}/validation_losses.pt")
+
+    teacher_forced_ratio *= 0.9
 
 writer.close()
