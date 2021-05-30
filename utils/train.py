@@ -39,6 +39,7 @@ def train_conditional_wavenet(model,
                               loader_val=None,
                               encoder=MuLawEncoding(),
                               epochs_start=0,
+                              counter_start=1,
                               print_every=1000,
                               save_every=10000,
                               validate_every=1000,
@@ -46,7 +47,7 @@ def train_conditional_wavenet(model,
                               writer=None,
                               device=torch.device("cpu")):
     # Count from 1
-    counter = 1
+    counter = counter_start
     train_losses = []
     validation_scores = []
     running_loss = 0.0
@@ -105,6 +106,8 @@ def train_conditional_wavenet(model,
 
             counter += 1
 
+    current_time = time.strftime("%y/%m/%d %H:%M:%S")
+    print(f"[{current_time}] Finish training after {counter} steps")
     return train_losses, validation_scores
 
 

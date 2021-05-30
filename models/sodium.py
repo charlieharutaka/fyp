@@ -883,6 +883,7 @@ class SodiumUpsampler(nn.Module):
         """
         pred_durations = self.duration_predictor.infer(encoder_output, durations, tempo)
         pred_durations = torch.round(pred_durations).to(torch.long)
+        print(pred_durations.sum(dim=0))
         pred_ranges = self.range_predictor.infer(encoder_output, pred_durations).squeeze(2)
         upsampled, upsampled_lengths, weights = self.upsampler(encoder_output, pred_durations, pred_ranges)
         pe = self.pos_embedding(pred_durations)
@@ -1059,8 +1060,37 @@ class SodiumDecoder(nn.Module):
 
 
 class SodiumTransformerDecoder(nn.Module):
-    def __init__(self):
-        pass
+    def __init__(self,
+            embedding_dim: int = 512,
+            prenet_n_layers: int = 2,
+            prenet_dim: int = 256,
+            prenet_activation: nn.Module = nn.ReLU(),
+            prenet_p_dropout: float = 0.5,
+            transformer_nlayers: int = 8,
+            transformer_nhead: int = 4,
+            transformer_ff_dim: int = 1024,
+            transformer_activation: str = "relu",
+            output_dim: int = 128,
+            p_dropout: float = 0.0):
+        self.output_dim = output_dim
+        # Pre-Net Projection
+        pre_net = []
+        for i in range(prenet_n_layers):
+            pre_net.append(nn.Sequential(
+                nn.Linear(output_dim if i == 0 else prenet_dim, prenet_dim),
+                prenet_activation,
+                nn.Dropout(prenet_p_dropout)))
+        self.pre_net = nn.Sequential(*pre_net)
+        self.pos_enc = TransformerPositionalEncoding(prenet_dim)
+
+        # Decoder
+        transformer_layer = nn.TransformerDecoderLayer(
+            prenet_dim, transformer_nhead, transformer_ff_dim, p_dropout, transformer_activation)
+        self.pos_enc = TransformerPositionalEncoding(embedding_lyric_dim)
+        self.decoder = nn.TransformerEncoder(transformer_layer, transformer_nlayers)
+
+        self.projection = nn.Linear(prenet_dim, output_dim)
+        init_uniform(self.projection)
 
 
 """ ---- The saltiest NN known to mankind ---- """

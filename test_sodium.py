@@ -19,7 +19,7 @@ from utils.musicxml import Note
 from utils.schedulers import LinearRampupDecayScheduler, LinearRampupCosineAnnealingScheduler
 from utils.transforms import PowerToDecibelTransform, ScaleToIntervalTransform, DynamicRangeCompression
 from utils import round_preserve_sum
-from hparams import SODIUM_HP, SODIUM_LARGE_HP
+from hparams import SODIUM_HP, SODIUM_LARGE_HP, SODIUM_RESNET_HP
 
 
 CUDA_IS_AVAILABLE = torch.cuda.is_available()
@@ -143,7 +143,7 @@ model = Sodium(
     num_pitches=128,
     num_singers=len(all_singers),
     num_techniques=len(all_techniques),
-    **SODIUM_LARGE_HP)
+    **SODIUM_RESNET_HP)
 model.to(device)
 params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print("Total number of parameters is: {}".format(params))
@@ -229,7 +229,7 @@ os.mkdir(run_name)
 writer = SummaryWriter(f'runs/sodium/{run_name}')
 writer.add_text(
     "Notes",
-    "BIG SODIUM 3! n_fft=800, n_mels=192, f_min=80.0, f_max=8000.0, clipped on both ends, range clipping 0.1, pitch only no encoder, decoder zoneout, data augmentation [-1, 0, 1], with singer/technique embedding & formant synthesis & LR schedule with better scheduling & 100 epochs with cosine annealing with linear max LR rampdown & curriculum learning")
+    "ResNetSodium! n_fft=800, n_mels=192, f_min=80.0, f_max=8000.0, clipped on both ends, range clipping 0.1, pitch only no encoder, decoder zoneout, data augmentation [-1, 0, 1], with singer/technique embedding & formant synthesis & LR schedule with better scheduling & 100 epochs with cosine annealing with linear max LR rampdown & curriculum learning")
 model.train()
 
 all_mel_losses = []
