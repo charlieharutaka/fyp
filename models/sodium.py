@@ -11,7 +11,7 @@ import torch.distributions as D
 import torchaudio
 
 from .tacotron import get_mask_from_lengths
-from .layers import ZoneOutLSTM
+from .layers import Linear, ZoneOutLSTM
 from .utils import softclamp
 
 """
@@ -508,7 +508,7 @@ class SodiumEncoder(nn.Module):
             prenet_kernel_size: int = 5,
             prenet_activation: nn.Module = nn.Identity(),
             p_dropout: float = 0.1,
-            use_transformer: bool = True,
+            use_transformer: bool = False,
             transformer_nlayers: int = 8,
             transformer_nhead: int = 4,
             transformer_ff_dim: int = 1024,
@@ -883,7 +883,6 @@ class SodiumUpsampler(nn.Module):
         """
         pred_durations = self.duration_predictor.infer(encoder_output, durations, tempo)
         pred_durations = torch.round(pred_durations).to(torch.long)
-        print(pred_durations.sum(dim=0))
         pred_ranges = self.range_predictor.infer(encoder_output, pred_durations).squeeze(2)
         upsampled, upsampled_lengths, weights = self.upsampler(encoder_output, pred_durations, pred_ranges)
         pe = self.pos_embedding(pred_durations)
@@ -907,6 +906,12 @@ class SodiumDecoder(nn.Module):
             decoder_n_layers: int = 1,
             output_dim: int = 128,
             zoneout: float = 0.0,
+            use_transformer: bool = False,
+            transformer_nlayers: int = 8,
+            transformer_nhead: int = 4,
+            transformer_ff_dim: int = 1024,
+            transformer_activation: str = "relu",
+            transformer_dropout: float = 0.1,
             use_resnet: bool = False,
             resnet_n_layers: int = 5,
             resnet_kernel_size: int = 5,
@@ -914,7 +919,10 @@ class SodiumDecoder(nn.Module):
             resnet_activation: nn.Module = nn.Tanh(),
             resnet_p_dropout: float = 0.1):
         super(SodiumDecoder, self).__init__()
+
+        assert not (use_resnet and use_transformer), "Make up your mind!!!"
         self.use_resnet = use_resnet
+        self.use_transformer = use_transformer
         if use_resnet:
             self.decoder = Sodium2dResnet(
                 embedding_dim=embedding_dim,
@@ -925,10 +933,7 @@ class SodiumDecoder(nn.Module):
                 p_dropout=resnet_p_dropout)
             self.projection = nn.Linear(embedding_dim, output_dim)
         else:
-            self.decoder_dim = decoder_dim
-            self.decoder_n_layers = decoder_n_layers
             self.output_dim = output_dim
-            self.zoneout = D.Bernoulli(zoneout)
             # Pre-Net Projection
             pre_net = []
             for i in range(prenet_n_layers):
@@ -937,12 +942,22 @@ class SodiumDecoder(nn.Module):
                     prenet_activation,
                     nn.Dropout(prenet_p_dropout)))
             self.pre_net = nn.Sequential(*pre_net)
+            self.prenet_dim = prenet_dim
             # Decoder
-            self.decoder = nn.ModuleList([
-                nn.LSTMCell(input_size=prenet_dim + embedding_dim if i == 0 else decoder_dim,
-                            hidden_size=decoder_dim)
-                for i in range(decoder_n_layers)])
-            self.projection = nn.Linear(decoder_dim + embedding_dim, output_dim)
+            if use_transformer:
+                transformer_layer = nn.TransformerDecoderLayer(prenet_dim, transformer_nhead, transformer_ff_dim, transformer_dropout, transformer_activation)
+                self.pos_enc = TransformerPositionalEncoding(prenet_dim, max_length=10000)
+                self.decoder = nn.TransformerDecoder(transformer_layer, transformer_nlayers)
+                self.projection = nn.Linear(prenet_dim + embedding_dim, output_dim)
+            else:
+                self.decoder_dim = decoder_dim
+                self.decoder_n_layers = decoder_n_layers
+                self.zoneout = D.Bernoulli(zoneout)
+                self.decoder = nn.ModuleList([
+                    nn.LSTMCell(input_size=prenet_dim + embedding_dim if i == 0 else decoder_dim,
+                                hidden_size=decoder_dim)
+                    for i in range(decoder_n_layers)])
+                self.projection = nn.Linear(decoder_dim + embedding_dim, output_dim)
         init_uniform(self.projection)
 
     def init_go_frame(self, encoder_out: torch.FloatTensor) -> torch.FloatTensor:
@@ -974,8 +989,20 @@ class SodiumDecoder(nn.Module):
                 (batch, self.decoder_dim), requires_grad=True) for _ in range(
                 self.decoder_n_layers)]
 
+    def generate_square_subsequent_mask(self, sz: int) -> torch.Tensor:
+            """
+            Generate a square mask for the sequence.
+
+            Args:
+                sz (int) maximum length
+            Returns:
+                mask (sz, sz)
+            """
+            mask = ~(torch.triu(torch.ones(sz, sz)) == 1).transpose(0, 1)
+            return mask
+
     def forward(self, encoder_out: torch.FloatTensor, mels: torch.FloatTensor,
-                teacher_forced_ratio: float = 1.0) -> torch.FloatTensor:
+                teacher_forced_ratio: float = 1.0, mel_lengths: torch.LongTensor = None) -> torch.FloatTensor:
         """
         Teacher-forced training.
         Args:
@@ -986,6 +1013,31 @@ class SodiumDecoder(nn.Module):
         """
         if self.use_resnet:
             outputs = self.decoder(encoder_out)
+            outputs = self.projection(outputs)
+        elif self.use_transformer:
+            assert mel_lengths is not None, "Need lengths for Transformer padding masking"
+
+            go_frame = self.init_go_frame(encoder_out)
+            decoder_inputs = torch.cat([go_frame.unsqueeze(0), mels], dim=0)
+            decoder_inputs = self.pre_net(decoder_inputs)
+            decoder_inputs = self.pos_enc(decoder_inputs)
+
+            sequence, _, _ = encoder_out.shape
+            target_mask = self.generate_square_subsequent_mask(sequence + 1)
+            memory_mask = torch.cat((torch.diag(torch.ones(sequence)), torch.ones(1, sequence)), dim=0) == 0
+            target_padding_mask = ~get_mask_from_lengths(mel_lengths + 1)
+            memory_padding_mask = ~get_mask_from_lengths(mel_lengths)
+
+            device = encoder_out.device
+            target_mask = target_mask.to(device)
+            memory_mask = memory_mask.to(device)
+            target_padding_mask = target_padding_mask.to(device)
+            memory_padding_mask = memory_padding_mask.to(device)
+
+            outputs = self.decoder(decoder_inputs, encoder_out, tgt_mask=target_mask, memory_mask=memory_mask, tgt_key_padding_mask=target_padding_mask, memory_key_padding_mask=memory_padding_mask)
+            outputs = outputs[:-1, :, :]
+            outputs = torch.cat([outputs, encoder_out], dim=-1)
+            
             outputs = self.projection(outputs)
         else:
             go_frame = self.init_go_frame(encoder_out)
@@ -1035,6 +1087,31 @@ class SodiumDecoder(nn.Module):
             outputs = self.decoder(encoder_out)
             outputs = self.projection(outputs)
             return outputs
+        elif self.use_transformer:
+            output = self.init_go_frame(encoder_out).unsqueeze(0)
+            outputs = []
+
+            device = encoder_out.device
+            sequence, batch, _ = encoder_out.shape
+            assert batch == 1, "Batched inference is a bit wild, no?"
+            decoder_inputs = encoder_out.new_empty((0, batch, self.prenet_dim))
+
+            all_memory_mask = torch.cat((torch.diag(torch.ones(sequence)), torch.ones(1, sequence)), dim=0) == 0
+            all_memory_mask = all_memory_mask.to(device)
+
+            for frame in range(sequence):
+                output = self.pre_net(output)
+                output = self.pos_enc(output)
+                decoder_inputs = torch.cat([decoder_inputs, output], dim=0)
+                
+                memory_mask = all_memory_mask[:frame + 1, :]
+                transformer_out = self.decoder(decoder_inputs, encoder_out, memory_mask=memory_mask)
+                output = transformer_out[-1, :, :]
+                output = torch.cat([output, encoder_out[frame]], dim=-1).unsqueeze(0)
+                output = self.projection(output)
+                outputs.append(output)
+            outputs = torch.cat(outputs, dim=0)
+            return outputs                
         else:
             output = self.init_go_frame(encoder_out)
             self.init_rnn_states(encoder_out)
@@ -1057,40 +1134,6 @@ class SodiumDecoder(nn.Module):
             else:
                 warnings.warn("No mels produced", UserWarning)
                 return torch.empty((0, encoder_out.shape[1], self.output_dim))
-
-
-class SodiumTransformerDecoder(nn.Module):
-    def __init__(self,
-            embedding_dim: int = 512,
-            prenet_n_layers: int = 2,
-            prenet_dim: int = 256,
-            prenet_activation: nn.Module = nn.ReLU(),
-            prenet_p_dropout: float = 0.5,
-            transformer_nlayers: int = 8,
-            transformer_nhead: int = 4,
-            transformer_ff_dim: int = 1024,
-            transformer_activation: str = "relu",
-            output_dim: int = 128,
-            p_dropout: float = 0.0):
-        self.output_dim = output_dim
-        # Pre-Net Projection
-        pre_net = []
-        for i in range(prenet_n_layers):
-            pre_net.append(nn.Sequential(
-                nn.Linear(output_dim if i == 0 else prenet_dim, prenet_dim),
-                prenet_activation,
-                nn.Dropout(prenet_p_dropout)))
-        self.pre_net = nn.Sequential(*pre_net)
-        self.pos_enc = TransformerPositionalEncoding(prenet_dim)
-
-        # Decoder
-        transformer_layer = nn.TransformerDecoderLayer(
-            prenet_dim, transformer_nhead, transformer_ff_dim, p_dropout, transformer_activation)
-        self.pos_enc = TransformerPositionalEncoding(embedding_lyric_dim)
-        self.decoder = nn.TransformerEncoder(transformer_layer, transformer_nlayers)
-
-        self.projection = nn.Linear(prenet_dim, output_dim)
-        init_uniform(self.projection)
 
 
 """ ---- The saltiest NN known to mankind ---- """
@@ -1119,7 +1162,7 @@ class Sodium(nn.Module):
             encoder_prenet_kernel_size: int = 5,
             encoder_prenet_activation: nn.Module = nn.Identity(),
             encoder_p_dropout: float = 0.1,
-            encoder_use_transformer: bool = True,
+            encoder_use_transformer: bool = False,
             encoder_transformer_nlayers: int = 8,
             encoder_transformer_nhead: int = 4,
             encoder_transformer_ff_dim: int = 1024,
@@ -1131,6 +1174,7 @@ class Sodium(nn.Module):
             encoder_resnet_n_hidden_channels: int = 128,
             encoder_resnet_activation: nn.Module = nn.ReLU(),
             encoder_resnet_p_dropout: float = 0.1,
+            encoder_output_projection: int = 0,
             duration_hidden_dim: int = 256,
             # duration_n_layers: int = 1,
             duration_bias: bool = False,
@@ -1149,6 +1193,12 @@ class Sodium(nn.Module):
             decoder_n_layers: int = 1,
             output_dim: int = 128,
             decoder_zoneout: float = 0.0,
+            decoder_use_transformer: bool = False,
+            decoder_transformer_nlayers: int = 8,
+            decoder_transformer_nhead: int = 4,
+            decoder_transformer_ff_dim: int = 1024,
+            decoder_transformer_activation: str = "relu",
+            decoder_transformer_dropout: float = 0.1,
             decoder_resnet_n_layers: int = 5,
             decoder_resnet_kernel_size: int = 5,
             decoder_resnet_n_hidden_channels: int = 128,
@@ -1189,7 +1239,16 @@ class Sodium(nn.Module):
             resnet_n_hidden_channels=encoder_resnet_n_hidden_channels,
             resnet_activation=encoder_resnet_activation,
             resnet_p_dropout=encoder_resnet_p_dropout)
-        encoder_out_dim = embedding_lyric_dim + embedding_pitch_dim + embedding_singer_dim + embedding_technique_dim
+        if encoder_output_projection > 0:
+            self.use_encoder_out_projection = True
+            encoder_out_dim = encoder_output_projection
+            self.encoder_output_projection = nn.Sequential(
+                nn.Linear(embedding_lyric_dim + embedding_pitch_dim + embedding_singer_dim + embedding_technique_dim, encoder_out_dim),
+                nn.ReLU(),
+                nn.Linear(encoder_out_dim, encoder_out_dim))
+        else:
+            self.use_encoder_out_projection = False
+            encoder_out_dim = embedding_lyric_dim + embedding_pitch_dim + embedding_singer_dim + embedding_technique_dim
         self.upsampler = SodiumUpsampler(
             embedding_dim=encoder_out_dim,
             duration_hidden_dim=duration_hidden_dim,
@@ -1212,6 +1271,12 @@ class Sodium(nn.Module):
             decoder_n_layers=decoder_n_layers,
             output_dim=output_dim,
             zoneout=decoder_zoneout,
+            use_transformer=decoder_use_transformer,
+            transformer_nlayers=decoder_transformer_nlayers,
+            transformer_nhead=decoder_transformer_nhead,
+            transformer_ff_dim=decoder_transformer_ff_dim,
+            transformer_activation=decoder_transformer_activation,
+            transformer_dropout=decoder_transformer_dropout,
             use_resnet=use_resnet,
             resnet_n_layers=decoder_resnet_n_layers,
             resnet_kernel_size=decoder_resnet_kernel_size,
@@ -1236,11 +1301,14 @@ class Sodium(nn.Module):
             target_durations,
             input_lengths,
             mels,
-            teacher_forced_ratio: float = 1.0):
+            teacher_forced_ratio: float = 1.0,
+            mel_lengths: torch.LongTensor = None):
         encoder_out = self.encoder(lyrics, pitches, singers, techniques, input_lengths)
+        if self.use_encoder_out_projection:
+            encoder_out = self.encoder_output_projection(encoder_out)
         pred_durations, upsampled, _, weights = self.upsampler(
             encoder_out, durations, tempo, target_durations, input_lengths)
-        output = self.decoder(upsampled, mels, teacher_forced_ratio=teacher_forced_ratio)
+        output = self.decoder(upsampled, mels, teacher_forced_ratio=teacher_forced_ratio, mel_lengths=mel_lengths)
 
         postnet_output = output.permute(1, 2, 0)
         postnet_output = self.post_net(postnet_output)
@@ -1251,8 +1319,9 @@ class Sodium(nn.Module):
 
     def infer(self, singers, techniques, lyrics, pitches, durations, tempo):
         encoder_out = self.encoder.infer(lyrics, pitches, singers, techniques)
+        if self.use_encoder_out_projection:
+            encoder_out = self.encoder_output_projection(encoder_out)
         upsampled, _, weights = self.upsampler.infer(encoder_out, durations, tempo)
-        print(upsampled.shape)
         output = self.decoder.infer(upsampled)
 
         if output.shape[0] > 1:

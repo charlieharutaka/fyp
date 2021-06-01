@@ -19,7 +19,7 @@ from utils.musicxml import Note
 from utils.schedulers import LinearRampupDecayScheduler, LinearRampupCosineAnnealingScheduler
 from utils.transforms import PowerToDecibelTransform, ScaleToIntervalTransform, DynamicRangeCompression
 from utils import round_preserve_sum
-from hparams import SODIUM_HP, SODIUM_LARGE_HP, SODIUM_RESNET_HP
+from hparams import SODIUM_HP, SODIUM_LARGE_HP, SODIUM_RESNET_HP, SODIUM_TRANSFORMER_HP
 
 
 CUDA_IS_AVAILABLE = torch.cuda.is_available()
@@ -31,7 +31,9 @@ else:
 
 print("==========")
 
-BATCH_SIZE = 8
+BATCH_SIZE = 1
+USE_PSEUDO_BATCH = True
+PSEUDO_BATCH_SIZE = 8
 
 print(f"Batch size: {BATCH_SIZE}")
 
@@ -124,9 +126,10 @@ fixed_notes_len = torch.tensor(fixed_lyrics.shape[1]).unsqueeze(0).to(torch.int6
 fixed_mel = fixed_sample.mel.unsqueeze(0).to(device)
 fixed_mel_len = fixed_mel.shape[1]
 fixed_mels_per_beat = fixed_mel_len / fixed_rhythm.sum(dim=1)
-fixed_target_durations = round_preserve_sum(fixed_mels_per_beat.unsqueeze(0) * fixed_rhythm)
+fixed_target_durations = round_preserve_sum(fixed_mels_per_beat * fixed_rhythm)
 fixed_computed_tempo = ((1 / fixed_mels_per_beat) / 400) * 16000 * 60
 fixed_computed_tempo = fixed_computed_tempo.to(device)
+fixed_mel_len = torch.tensor([fixed_mel_len])
 
 fixed_lyrics = fixed_lyrics.transpose(0, 1)
 fixed_pitches = fixed_pitches.transpose(0, 1)
@@ -143,16 +146,15 @@ model = Sodium(
     num_pitches=128,
     num_singers=len(all_singers),
     num_techniques=len(all_techniques),
-    **SODIUM_RESNET_HP)
+    **SODIUM_TRANSFORMER_HP)
 model.to(device)
 params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print("Total number of parameters is: {}".format(params))
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-5, weight_decay=1e-6)
 # Ramp up in 1 epoch and decay by half every 10 epochs after
-# scheduler = LinearRampupDecayScheduler(optimizer, 0.001, 0.05, len(loader_train), 0.5 ** (1 / 10), len(loader_train))
+scheduler = LinearRampupDecayScheduler(optimizer, 0.001, 0.05, len(loader_train), 0.5 ** (1 / 10), len(loader_train))
 scheduler = LinearRampupCosineAnnealingScheduler(
     optimizer, 1e-5, 1e-2, 1e-4, len(loader_train), len(loader_train), max_lr_decay=0.5 ** (1 / 10))
-
 
 def prepare_data(batch):
     singers = []
@@ -229,7 +231,7 @@ os.mkdir(run_name)
 writer = SummaryWriter(f'runs/sodium/{run_name}')
 writer.add_text(
     "Notes",
-    "ResNetSodium! n_fft=800, n_mels=192, f_min=80.0, f_max=8000.0, clipped on both ends, range clipping 0.1, pitch only no encoder, decoder zoneout, data augmentation [-1, 0, 1], with singer/technique embedding & formant synthesis & LR schedule with better scheduling & 100 epochs with cosine annealing with linear max LR rampdown & curriculum learning")
+    "Transformer Sodium! n_fft=800, n_mels=192, f_min=80.0, f_max=8000.0, clipped on both ends, range clipping 0.1, pitch only no encoder, decoder zoneout, data augmentation [-1, 0, 1], with singer/technique embedding & formant synthesis")
 model.train()
 
 all_mel_losses = []
@@ -248,8 +250,8 @@ for epoch in range(1, NUM_EPOCHS + 1):
     print(f"=== Epoch {epoch} ===")
     losses = []
     model.train()
+    optimizer.zero_grad()
     for t, batch in enumerate(loader_train, 1):
-        optimizer.zero_grad()
 
         singers, techniques, lyrics, pitches, rhythms, notes_lens, mels, tempos, computed_tempos, target_durations, mel_lens = prepare_data(
             batch)
@@ -261,12 +263,15 @@ for epoch in range(1, NUM_EPOCHS + 1):
         mels = mels.transpose(0, 1)
 
         output, output_postnet, pred_durations, weights = model(
-            singers, techniques, lyrics, pitches, rhythms, computed_tempos, target_durations, notes_lens, mels, teacher_forced_ratio=teacher_forced_ratio)
+            singers, techniques, lyrics, pitches, rhythms, computed_tempos, target_durations, notes_lens, mels, teacher_forced_ratio=teacher_forced_ratio, mel_lengths=mel_lens)
         loss, mel_loss, postnet_loss, duration_loss = get_loss(
             output, output_postnet, pred_durations, mels, target_durations, mel_lens, lambda_dur=1.0)
         loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
+        
+        if (not USE_PSEUDO_BATCH) or (t % PSEUDO_BATCH_SIZE == 0 or t == len(loader_train)):
+            optimizer.step()
+            optimizer.zero_grad()
         scheduler.step()
         # Loss
         losses.append(loss.item())
@@ -301,7 +306,7 @@ for epoch in range(1, NUM_EPOCHS + 1):
             mels = mels.transpose(0, 1)
 
             output, output_postnet, pred_durations, weights = model(
-                singers, techniques, lyrics, pitches, rhythms, computed_tempos, target_durations, notes_lens, mels, teacher_forced_ratio=teacher_forced_ratio)
+                singers, techniques, lyrics, pitches, rhythms, computed_tempos, target_durations, notes_lens, mels, teacher_forced_ratio=teacher_forced_ratio, mel_lengths=mel_lens)
             loss, mel_loss, postnet_loss, duration_loss = get_loss(
                 output, output_postnet, pred_durations, mels, target_durations, mel_lens, lambda_dur=1.0)
 
@@ -326,7 +331,7 @@ for epoch in range(1, NUM_EPOCHS + 1):
         output, output_postnet, pred_durations, weights = model(
             fixed_singer, fixed_technique, fixed_lyrics, fixed_pitches,
             fixed_rhythm, fixed_computed_tempo, fixed_target_durations,
-            fixed_notes_len, fixed_mel)
+            fixed_notes_len, fixed_mel, mel_lengths=fixed_mel_len)
 
         # Duration illustration
         fig, ax = plt.subplots(figsize=(10, 5))
