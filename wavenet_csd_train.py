@@ -6,7 +6,7 @@ from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import DataLoader, random_split
 
 from models.wavenet import WaveNet
-from utils.datasets import ChoralSingingDataset
+from utils.datasets import ChoralSingingDataset, VocalSetWavenetDataset
 from utils.train import train_conditional_wavenet
 from utils.transforms import DynamicRangeCompression
 
@@ -37,7 +37,7 @@ wavenet_hp = {
     "bias": False
 }
 
-BATCH_SIZE = 32
+BATCH_SIZE = 16
 encoder = torchaudio.transforms.MuLawEncoding(wavenet_hp["classes"])
 decoder = torchaudio.transforms.MuLawDecoding(wavenet_hp["classes"])
 
@@ -50,17 +50,17 @@ model.to(device)
 nparams = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"=====\nNumber of parameters: {nparams}\nReceptive field: {model.receptive_field}")
 
-MODEL_NAME = "wavenet.csd.final"
+MODEL_NAME = "wavenet.vs.final"
 
 # Load checkpoint
-model.load_state_dict(torch.load(f"{MODEL_NAME}.final_cont.pt"))
+# model.load_state_dict(torch.load(f"{MODEL_NAME}.final_cont.pt"))
 
 
 # The Dataset
 # We want to normalize the data using box-cox and z-score normalization
 spectrogram_transform = DynamicRangeCompression()
 # spectrogram_transform = nn.Sequential(PowerToDecibelTransform(torch.max), ScaleToIntervalTransform())
-dataset = ChoralSingingDataset('data', model.receptive_field, n_mels=192, n_fft=800, spectrogram_transform=spectrogram_transform)
+dataset = VocalSetWavenetDataset('data', model.receptive_field, n_mels=192, n_fft=800, spectrogram_transform=spectrogram_transform)
 # Calculate the splits
 length_train = int(0.99 * len(dataset))
 length_valid = len(dataset) - length_train
@@ -74,8 +74,8 @@ print(f"=====\nTraining Samples/Batches: {length_train}/{len(loader_train)}\nTes
 print(f"=====\nTraining {MODEL_NAME}...")
 
 writer = SummaryWriter(log_dir=f"./runs/wavenet/{MODEL_NAME}")
-train_losses, valid_losses = train_conditional_wavenet(model, optimizer, criterion, 10, loader_train, loader_valid, encoder, epochs_start=10, counter_start=85780, print_every=1000, save_every=10000, validate_every=1000, save_as=MODEL_NAME, writer=writer, device=device)
-torch.save(model.state_dict(), f"{MODEL_NAME}.final_cont2.pt")
-torch.save(torch.tensor(train_losses), f"{MODEL_NAME}.train_losses_cont2.pt")
-torch.save(torch.tensor(valid_losses), f"{MODEL_NAME}.valid_losses_cont2.pt")
+train_losses, valid_losses = train_conditional_wavenet(model, optimizer, criterion, 10, loader_train, loader_valid, encoder, print_every=1000, save_every=10000, validate_every=1000, save_as=MODEL_NAME, writer=writer, device=device)
+torch.save(model.state_dict(), f"{MODEL_NAME}.final.pt")
+torch.save(torch.tensor(train_losses), f"{MODEL_NAME}.train_losses.pt")
+torch.save(torch.tensor(valid_losses), f"{MODEL_NAME}.valid_losses.pt")
 writer.close()
