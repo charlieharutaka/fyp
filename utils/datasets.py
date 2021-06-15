@@ -300,8 +300,8 @@ class VocalSetWavenetDataset(Dataset):
             w, sr = torchaudio.load(file_to_load)
             assert sr == self.original_sample_rate, "Sample rate mismatch"
             w = self.resample(w)
-            # Normalize w to be in [-1, 1]
-            w = 2.0 * ((w - w.min()) / (w.max() - w.min())) - 1.0
+            # Clamp w to be in [-1, 1]
+            w = torch.clamp(w, min=-1.0, max=1.0)
             w_spec = self.melspec(w)
             if self.spectrogram_transform is not None:
                 w_spec = spectrogram_transform(w_spec)

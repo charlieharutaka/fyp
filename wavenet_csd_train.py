@@ -43,14 +43,14 @@ decoder = torchaudio.transforms.MuLawDecoding(wavenet_hp["classes"])
 
 # The Model
 model = WaveNet(**wavenet_hp)
-optimizer = torch.optim.Adam(model.parameters(), lr=0.0001, weight_decay=1e-6)
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-6)
 criterion = nn.CrossEntropyLoss()
 
 model.to(device)
 nparams = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"=====\nNumber of parameters: {nparams}\nReceptive field: {model.receptive_field}")
 
-MODEL_NAME = "wavenet.vs.final"
+MODEL_NAME = "wavenet.vs2.final"
 
 # Load checkpoint
 # model.load_state_dict(torch.load(f"{MODEL_NAME}.final_cont.pt"))
