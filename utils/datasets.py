@@ -165,11 +165,13 @@ class ChoralSingingDataset(Dataset):
         # Now the data should be in the right place
         # Load the data
         self.original_data = []
+        total_len = 0
         for piece in self.pieces.keys():
             for part in self.parts.keys():
                 for idx in range(4):
                     file_to_load = f"{self.dataset_directory}/{self.prefix}_{piece}_{part}_{idx + 1}.{self.ext}"
                     w, sr = torchaudio.load(file_to_load)
+                    total_len += w.shape[-1]
                     assert sr == self.original_sample_rate, "Sample rate mismatch"
                     w = self.resample(w)
                     w_spec = self.melspec(w)
@@ -186,6 +188,8 @@ class ChoralSingingDataset(Dataset):
             self.length += num_segments
             self.lengths.append(num_segments)
             self.cumulative_lengths.append(self.length)
+        
+        print(total_len)
 
     def __len__(self):
         return self.length

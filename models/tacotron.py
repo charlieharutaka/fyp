@@ -283,7 +283,6 @@ def get_mask_from_lengths(lengths: torch.LongTensor) -> torch.BoolTensor:
 class LocationLayer(nn.Module):
     """
     Location Sensitive Attention: https://arxiv.org/pdf/1506.07503v1.pdf
-    Uses convolutional filters to do something idk
     """
 
     def __init__(self,
