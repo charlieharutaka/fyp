@@ -32,7 +32,7 @@ WAVENET_HP = {
     "layers": 10,
     "blocks": 4,
     "in_channels": 1,
-    "cond_in_channels": 64,
+    "cond_in_channels": 192,
     "cond_channels": 32,
     "dilation_channels": 32,
     "residual_channels": 32,
