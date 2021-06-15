@@ -1,110 +1,81 @@
 import os
 
 import torch
-from torch import cuda as torch_cuda
 import torch.nn as nn
-import torch.nn.functional as F
+from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import DataLoader, random_split
+
+from models.wavenet import WaveNet
+from utils.datasets import ChoralSingingDataset, VocalSetWavenetDataset
+from utils.train import train_conditional_wavenet
+from utils.transforms import DynamicRangeCompression
+
 import torchaudio
 if os.name == 'posix':
     torchaudio.set_audio_backend("sox_io")
 
-from models.wavenet import WaveNet
-from utils.datasets import SegmentedAudioDataset
-
-CUDA_IS_AVAILABLE = torch_cuda.is_available()
-print(f"Using {'CUDA' if CUDA_IS_AVAILABLE else 'CPU'} | Audio Backend: {torchaudio.get_audio_backend()}")
+CUDA_IS_AVAILABLE = torch.cuda.is_available()
+print(f"Using {'CUDA' if CUDA_IS_AVAILABLE else 'CPU'}\nAudio Backend: {torchaudio.get_audio_backend()}")
 if CUDA_IS_AVAILABLE:
     device = torch.device('cuda')
 else:
     device = torch.device('cpu')
 
-"""
-Initialize Model
-"""
+# Hyperparameters
+wavenet_hp = {
+    "layers": 10,
+    "blocks": 4,
+    "in_channels": 1,
+    "cond_in_channels": 192,
+    "cond_channels": 32,
+    "dilation_channels": 32,
+    "residual_channels": 32,
+    "skip_channels": 256,
+    "end_channels": 256,
+    "classes": 256,
+    "kernel_size": 2,
+    "bias": False
+}
 
-model = WaveNet(layers=14,
-                blocks=2,
-                dilation_channels=32,
-                residual_channels=32,
-                skip_channels=256,
-                end_channels=256,
-                classes=256,
-                bias=True)
-model.to(device)
+BATCH_SIZE = 16
+encoder = torchaudio.transforms.MuLawEncoding(wavenet_hp["classes"])
+decoder = torchaudio.transforms.MuLawDecoding(wavenet_hp["classes"])
 
-optimizer = torch.optim.Adam(model.parameters())
+# The Model
+model = WaveNet(**wavenet_hp)
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-6)
 criterion = nn.CrossEntropyLoss()
 
+model.to(device)
 nparams = sum(p.numel() for p in model.parameters() if p.requires_grad)
-print(f"Number of parameters: {nparams} | Receptive field: {model.receptive_field}")
+print(f"=====\nNumber of parameters: {nparams}\nReceptive field: {model.receptive_field}")
 
-"""
-Datasets
-"""
+MODEL_NAME = "wavenet.vs2.final"
 
-DATA_DIR = './data/'
+# Load checkpoint
+# model.load_state_dict(torch.load(f"{MODEL_NAME}.final_cont.pt"))
 
-if not os.path.exists(DATA_DIR):
-    os.mkdir(DATA_DIR)
-arctic = torchaudio.datasets.CMUARCTIC(DATA_DIR, download=True)
-audio_data = [data[0] for data in arctic]
-dataset = SegmentedAudioDataset(audio_data, model.receptive_field)
-length_train = int(0.9 * len(dataset))
-length_test = len(dataset) - length_train
-dataset_train, dataset_test = random_split(dataset, [length_train, length_test])
 
-BATCH_SIZE = 8
+# The Dataset
+# We want to normalize the data using box-cox and z-score normalization
+spectrogram_transform = DynamicRangeCompression()
+# spectrogram_transform = nn.Sequential(PowerToDecibelTransform(torch.max), ScaleToIntervalTransform())
+dataset = VocalSetWavenetDataset('data', model.receptive_field, n_mels=192, n_fft=800, spectrogram_transform=spectrogram_transform)
+# Calculate the splits
+length_train = int(0.99 * len(dataset))
+length_valid = len(dataset) - length_train
 
+dataset_train, dataset_valid = random_split(dataset, [length_train, length_valid])
 loader_train = DataLoader(dataset_train, batch_size=BATCH_SIZE, shuffle=True)
-loader_test = DataLoader(dataset_test, batch_size=BATCH_SIZE, shuffle=False)
+loader_valid = DataLoader(dataset_valid, batch_size=BATCH_SIZE, shuffle=False)
 
-print(f"Training Samples/Batches: {length_train}/{len(loader_train)} | Testing Samples/Batches: {length_test}/{len(loader_test)}")
 
-"""
-Training
-"""
+print(f"=====\nTraining Samples/Batches: {length_train}/{len(loader_train)}\nTesting Samples/Batches: {length_valid}/{len(loader_valid)}")
+print(f"=====\nTraining {MODEL_NAME}...")
 
-PRINT_EVERY = 500
-SAVE_EVERY = 10000
-MODEL_NAME = "wavenet.segmented"
-
-encoder = torchaudio.transforms.MuLawEncoding(256)
-decoder = torchaudio.transforms.MuLawDecoding(256)
-
-def train(epochs, epochs_start=0, verbose=True):
-    counter = 1
-    train_losses = []
-    running_loss = 0.0
-
-    for epoch in range(epochs_start, epochs_start + epochs):
-        model.train()
-        for t, batch in enumerate(loader_train):
-            optimizer.zero_grad()
-
-            inputs, target = batch
-            target = encoder(target)
-            inputs = inputs.to(device).unsqueeze(1)
-            target = target.to(device)
-            # Get prediction
-            preds = model(inputs)
-            # Calculate loss
-            loss = F.cross_entropy(preds, target)
-            loss.backward()
-            optimizer.step()
-            # Stats
-            train_losses.append(loss.item())
-            running_loss += loss.item()
-
-            if counter % PRINT_EVERY == 0:
-                print(f'Epoch: {epoch+1} | Iteration: {t+1} | Loss: {running_loss / PRINT_EVERY}')
-                running_loss = 0.0
-            if counter % SAVE_EVERY == 0:
-                torch.save(model.state_dict(), f'{MODEL_NAME}.step_{counter}.pt')
-
-            counter += 1
-
-    return train_losses
-
-train(10)
-torch.save(model.state_dict(), f'{MODEL_NAME}.pt')
+writer = SummaryWriter(log_dir=f"./runs/wavenet/{MODEL_NAME}")
+train_losses, valid_losses = train_conditional_wavenet(model, optimizer, criterion, 10, loader_train, loader_valid, encoder, print_every=1000, save_every=10000, validate_every=1000, save_as=MODEL_NAME, writer=writer, device=device)
+torch.save(model.state_dict(), f"{MODEL_NAME}.final.pt")
+torch.save(torch.tensor(train_losses), f"{MODEL_NAME}.train_losses.pt")
+torch.save(torch.tensor(valid_losses), f"{MODEL_NAME}.valid_losses.pt")
+writer.close()
