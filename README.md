@@ -1,6 +1,6 @@
 # Deep Neural Network-based Singing Synthesis
 
-Contains all the code for Deep Neural Network-based Singing Synthesis.
+Contains all the code for my final year project, Deep Neural Network-based Singing Synthesis.
 
 ## Datasets
 
@@ -41,3 +41,5 @@ The arguments are:
 
 
 The script will generate 3 files, a `.png` of the spectrogram, a `.pt` of the spectrogram, and a `.wav` LPCM file of the produced audio.
+
+Model files can be downloaded in the releases section of this repository, https://github.com/charlieharutaka/fyp/releases.
