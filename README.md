@@ -4,10 +4,11 @@ Contains all the code for my final year project, Deep Neural Network-based Singi
 
 ## Datasets
 
-There are two datasets in `utils/datasets.py`, Choral Singing Dataset and VocalSet.
+There are two datasets in `utils/datasets.py`, [Choral Singing Dataset](https://zenodo.org/record/2649950) and [VocalSet](https://zenodo.org/record/1193957).
 These have the base class `torch.utils.data.Dataset`.
-When run for the first time they will download their datasets as needed.
-VocalSet will also create a cache of each sample, ~10GB large.
+When run for the first time they will download and extract their datasets as needed, 2.32GB for CSD and 4.7GB for VocalSet (archive + extracted size).
+VocalSet will also create a cache of each sample, about 7.4GB large.
+The VocalSet dataset will also download scores, which can be manually downloaded [here](https://drive.google.com/file/d/1Hf879juSGqYN3Y0rFmL6cbEwwIlrHa9e/view?usp=sharing).
 
 ## Models
 
